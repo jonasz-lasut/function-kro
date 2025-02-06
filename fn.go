@@ -6,6 +6,7 @@ import (
 
 	"github.com/upbound/function-kro/input/v1beta1"
 	"github.com/upbound/function-kro/kro/graph"
+	"github.com/upbound/function-kro/kro/runtime"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -16,6 +17,8 @@ import (
 	fnv1 "github.com/crossplane/function-sdk-go/proto/v1"
 	"github.com/crossplane/function-sdk-go/request"
 	"github.com/crossplane/function-sdk-go/resource"
+	"github.com/crossplane/function-sdk-go/resource/composed"
+	"github.com/crossplane/function-sdk-go/resource/composite"
 	"github.com/crossplane/function-sdk-go/response"
 )
 
@@ -54,7 +57,6 @@ func (f *Function) RunFunction(_ context.Context, req *fnv1.RunFunctionRequest) 
 		}
 		gvks = append(gvks, schema.FromAPIVersionAndKind(u.GetAPIVersion(), u.GetKind()))
 	}
-
 	// Tell Crossplane we need the CRDs for our XR and resource templates.
 	// TODO(negz): In v2 we'll need to handle resource templates for built-in
 	// types that don't have CRDs - e.g. Deployment.
@@ -65,19 +67,32 @@ func (f *Function) RunFunction(_ context.Context, req *fnv1.RunFunctionRequest) 
 	for i := range gvks {
 		e, ok := req.GetExtraResources()[gvks[i].String()]
 		if !ok {
-			// Crossplane hasn't sent us this required CRD. Let it know.
+			// Crossplane hasn't sent us this required CRD yet. Let it know.
+			f.log.Debug("Required CRD doesn't appear in extra resources - returning requirements", "gvk", gvks[i].String())
+			return rsp, nil
+		}
+
+		if len(e.GetItems()) < 1 {
+			// Crossplane is telling us the required CRD doesn't exist.
+			f.log.Debug("Required CRD is unavailable", "gvk", gvks[i].String())
+			response.Fatal(rsp, errors.Errorf("required CRD for %q is unavailable", gvks[i]))
 			return rsp, nil
 		}
 
 		crd := &extv1.CustomResourceDefinition{}
 		if err := resource.AsObject(e.GetItems()[0].GetResource(), crd); err != nil {
-			response.Fatal(rsp, errors.Wrapf(err, "cannot unmarshal CRD for %s", gvks[i]))
+			f.log.Debug("Cannot unmarshal CRD", "gvk", gvks[i])
+			response.Fatal(rsp, errors.Wrapf(err, "cannot unmarshal CRD for %q", gvks[i]))
 			return rsp, nil
 		}
 
 		crds[i] = crd
 	}
 
+	// TODO(negz): CRDs don't contain schema for metadata, except that it exists
+	// and is an object. This means CEL won't let you use it. We need to inject
+	// the OpenAPI schema for metadata into these CRDs before we can use
+	// metadata in templates.
 	gb, err := graph.NewBuilder(crds...)
 	if err != nil {
 		response.Fatal(rsp, errors.Wrap(err, "cannot create resource graph builder"))
@@ -99,8 +114,72 @@ func (f *Function) RunFunction(_ context.Context, req *fnv1.RunFunctionRequest) 
 		return rsp, nil
 	}
 
-	// TODO(negz): Pickup from here: https://github.com/kro-run/kro/blob/87a9b1c460854170e9bceac001ff870933d6a084/pkg/controller/instance/controller_reconcile.go#L63
-	_ = rt.GetInstance()
+	ocds, err := request.GetObservedComposedResources(req)
+	if err != nil {
+		response.Fatal(rsp, errors.Wrap(err, "cannot get observed composed resources"))
+		return rsp, nil
+	}
+
+	ready := make(map[string]bool)
+
+	// TODO(negz): Is it okay to do this before create/update?
+	for name, r := range ocds {
+		id := string(name)
+		rt.SetResource(id, &r.Resource.Unstructured)
+
+		if ready, reason, err := rt.IsResourceReady(id); err != nil || !ready {
+			f.log.Info("Resource isn't ready yet", "id", id, "reason", reason, "err", err)
+			continue
+		}
+
+		ready[id] = true
+	}
+
+	dcds, err := request.GetDesiredComposedResources(req)
+	if err != nil {
+		response.Fatal(rsp, errors.Wrap(err, "cannot get desired composed resources"))
+		return rsp, nil
+	}
+
+	for _, id := range rt.TopologicalOrder() {
+		if want, err := rt.WantToCreateResource(id); err != nil || !want {
+			f.log.Info("Skipping resource", "id", id, "err", err)
+			rt.IgnoreResource(id)
+			continue
+		}
+
+		r, state := rt.GetResource(id)
+		if state != runtime.ResourceStateResolved {
+			f.log.Info("Skipping unresolved resource", "id", id, "state", state)
+			continue
+		}
+
+		cd, err := composed.From(r)
+		if err != nil {
+			response.Fatal(rsp, errors.Wrapf(err, "cannot create composed resource from template id %s", id))
+			return rsp, nil
+		}
+		dcds[resource.Name(id)] = &resource.DesiredComposed{Resource: cd, Ready: resource.ReadyFalse}
+		if ready[id] {
+			dcds[resource.Name(id)].Ready = resource.ReadyTrue
+		}
+
+		// TODO(negz): Do we need to do this even when we return/continue above?
+		if _, err := rt.Synchronize(); err != nil {
+			response.Fatal(rsp, errors.Wrap(err, "cannot synchronize instance"))
+			return rsp, nil
+		}
+	}
+
+	if err := response.SetDesiredComposedResources(rsp, dcds); err != nil {
+		response.Fatal(rsp, errors.Wrap(err, "cannot set desired composed resources"))
+		return rsp, nil
+	}
+
+	if err := response.SetDesiredCompositeResource(rsp, &resource.Composite{Resource: &composite.Unstructured{Unstructured: *rt.GetInstance()}}); err != nil {
+		response.Fatal(rsp, errors.Wrap(err, "cannot set desired composite resource"))
+		return rsp, nil
+	}
 
 	return rsp, nil
 }
