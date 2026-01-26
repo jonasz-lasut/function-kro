@@ -1,15 +1,16 @@
-// Copyright 2025 The Kube Resource Orchestrator Authors.
+// Copyright 2025 The Kubernetes Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License"). You may
-// not use this file except in compliance with the License. A copy of the
-// License is located at
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-//	http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// or in the "license" file accompanying this file. This file is distributed
-// on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
-// express or implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package graph
 
@@ -17,7 +18,9 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/upbound/function-kro/input/v1beta1"
+	"k8s.io/apimachinery/pkg/util/sets"
+
+	"github.com/kubernetes-sigs/kro/api/v1alpha1"
 )
 
 var (
@@ -33,8 +36,19 @@ var (
 	// kubernetesVersionRegex
 	kubernetesVersionRegex = regexp.MustCompile(`^v\d+(?:(?:alpha|beta)\d+)?$`)
 
-	// reservedKeyWords is a list of reserved words in kro.
-	reservedKeyWords = []string{
+	// celReservedSymbols is a list of RESERVED symbols defined in the CEL lexer.
+	// No identifiers are allowed to collide with these symbols.
+	// https://github.com/google/cel-spec/blob/master/doc/langdef.md#syntax
+	celReservedSymbols = sets.NewString(
+		"true", "false", "null", "in",
+		"as", "break", "const", "continue", "else",
+		"for", "function", "if", "import", "let",
+		"loop", "package", "namespace", "return",
+		"var", "void", "while",
+	)
+
+	// kroReservedKeyWords is a list of reserved words in kro.
+	kroReservedKeyWords = sets.NewString(
 		"apiVersion",
 		"context",
 		"dependency",
@@ -45,22 +59,31 @@ var (
 		"externalReferences",
 		"graph",
 		"instance",
+		"item",
+		"items",
 		"kind",
+		"kro",
 		"metadata",
 		"namespace",
 		"object",
 		"resource",
 		"resourcegraphdefinition",
+		"resourceGraphDefinition",
 		"resources",
+		"root",
 		"runtime",
+		"schema",
+		"self",
 		"serviceAccountName",
 		"spec",
 		"status",
-		"kro",
+		"this",
 		"variables",
 		"vars",
 		"version",
-	}
+	)
+
+	reservedKeyWords = kroReservedKeyWords.Union(celReservedSymbols)
 )
 
 // isValidResourceID checks if the given id is a valid KRO resource id (loawercase)
@@ -75,12 +98,20 @@ func isValidKindName(name string) bool {
 
 // isKROReservedWord checks if the given word is a reserved word in KRO.
 func isKROReservedWord(word string) bool {
-	for _, w := range reservedKeyWords {
-		if w == word {
-			return true
-		}
+	return reservedKeyWords.Has(word)
+}
+
+// validateResourceGraphDefinitionNamingConventions validates the naming conventions of
+// the given resource graph definition.
+func validateResourceGraphDefinitionNamingConventions(rgd *v1alpha1.ResourceGraphDefinition) error {
+	if !isValidKindName(rgd.Spec.Schema.Kind) {
+		return fmt.Errorf("%s: kind '%s' is not a valid KRO kind name: must be UpperCamelCase", ErrNamingConvention, rgd.Spec.Schema.Kind)
 	}
-	return false
+	err := validateResourceIDs(rgd)
+	if err != nil {
+		return fmt.Errorf("%s: %w", ErrNamingConvention, err)
+	}
+	return nil
 }
 
 // validateResource performs basic validation on a given resourcegraphdefinition.
@@ -90,10 +121,10 @@ func isKROReservedWord(word string) bool {
 // The KRO naming convention is as follows:
 // - The id should start with a lowercase letter.
 // - The id should only contain alphanumeric characters.
-// - does not contain any special characters, underscores, or hyphens.
-func validateResourceIDs(rgd *v1beta1.ResourceGraph) error {
+// - Does not contain any special characters, underscores, or hyphens.
+func validateResourceIDs(rgd *v1alpha1.ResourceGraphDefinition) error {
 	seen := make(map[string]struct{})
-	for _, res := range rgd.Resources {
+	for _, res := range rgd.Spec.Resources {
 		if isKROReservedWord(res.ID) {
 			return fmt.Errorf("id %s is a reserved keyword in KRO", res.ID)
 		}
@@ -136,7 +167,7 @@ func validateKubernetesObjectStructure(obj map[string]interface{}) error {
 
 	metadata, exists := obj["metadata"]
 	if !exists {
-		return nil
+		return fmt.Errorf("metadata field not found")
 	}
 	_, isMap := metadata.(map[string]interface{})
 	if !isMap {

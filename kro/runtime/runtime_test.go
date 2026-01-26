@@ -1,15 +1,16 @@
-// Copyright 2025 The Kube Resource Orchestrator Authors.
+// Copyright 2025 The Kubernetes Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License"). You may
-// not use this file except in compliance with the License. A copy of the
-// License is located at
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-//	http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// or in the "license" file accompanying this file. This file is distributed
-// on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
-// express or implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package runtime
 
@@ -37,6 +38,9 @@ func Test_RuntimeWorkflow(t *testing.T) {
 					"dbName": "prod-db",
 					"port":   5432,
 				},
+				"secret": map[string]interface{}{
+					"include": false,
+				},
 			},
 		}),
 		withVariables([]*variable.ResourceField{
@@ -53,9 +57,12 @@ func Test_RuntimeWorkflow(t *testing.T) {
 	)
 
 	secret := newTestResource(
+		withIncludeWhenExpressions([]string{"schema.spec.secret.include == true"}),
 		withObject(map[string]interface{}{
 			"metadata": map[string]interface{}{
-				"name": "${schema.spec.appName}-secret",
+				// this should not be evaluated since the
+				// resource should not be included
+				"name": "${schema.spec.secret.name}",
 			},
 			"stringData": map[string]interface{}{
 				"DB_URL": "${dburl_expr}",
@@ -65,7 +72,7 @@ func Test_RuntimeWorkflow(t *testing.T) {
 			{
 				FieldDescriptor: variable.FieldDescriptor{
 					Path:                 "metadata.name",
-					Expressions:          []string{"schema.spec.appName + '-secret'"},
+					Expressions:          []string{"schema.spec.secret.name"},
 					StandaloneExpression: true,
 				},
 				Kind: variable.ResourceVariableKindStatic,
@@ -627,104 +634,6 @@ func Test_GetResource(t *testing.T) {
 		})
 	}
 }
-
-func Test_GetRenderedResource(t *testing.T) {
-	tests := []struct {
-		name              string
-		resources         map[string]Resource
-		resolvedResources map[string]*unstructured.Unstructured
-		runtimeVariables  map[string][]*expressionEvaluationState
-		resourceName      string
-		wantObj           *unstructured.Unstructured
-		wantState         ResourceState
-	}{
-		{
-			// GetRenderedResource always returns the template, even when an
-			// observed resource exists in resolvedResources. This is critical
-			// for SSA - desired state must not include provider-defaulted fields.
-			name: "returns template not observed",
-			resources: map[string]Resource{
-				"test": newTestResource(
-					withObject(map[string]interface{}{
-						"spec": map[string]interface{}{
-							"value": "template",
-						},
-					}),
-				),
-			},
-			resolvedResources: map[string]*unstructured.Unstructured{
-				"test": {
-					Object: map[string]interface{}{
-						"spec": map[string]interface{}{
-							"value":         "observed",
-							"defaultedFlag": true, // Provider-defaulted field
-						},
-					},
-				},
-			},
-			resourceName: "test",
-			wantObj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"spec": map[string]interface{}{
-						"value": "template",
-					},
-				},
-			},
-			wantState: ResourceStateResolved,
-		},
-		{
-			name: "waiting on dependencies",
-			resources: map[string]Resource{
-				"test": newTestResource(
-					withObject(map[string]interface{}{
-						"spec": map[string]interface{}{
-							"value": "${expr1}",
-						},
-					}),
-					withVariables([]*variable.ResourceField{
-						{
-							FieldDescriptor: variable.FieldDescriptor{
-								Path:        "spec.value",
-								Expressions: []string{"expr1"},
-							},
-						},
-					}),
-				),
-			},
-			runtimeVariables: map[string][]*expressionEvaluationState{
-				"test": {
-					{
-						Kind:     variable.ResourceVariableKindDynamic,
-						Resolved: false,
-					},
-				},
-			},
-			resourceName: "test",
-			wantObj:      nil,
-			wantState:    ResourceStateWaitingOnDependencies,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rt := &ResourceGraphDefinitionRuntime{
-				resources:         tt.resources,
-				resolvedResources: tt.resolvedResources,
-				runtimeVariables:  tt.runtimeVariables,
-			}
-
-			gotObj, gotState := rt.GetRenderedResource(tt.resourceName)
-			if gotState != tt.wantState {
-				t.Errorf("GetRenderedResource() state = %v, want %v", gotState, tt.wantState)
-			}
-
-			if !reflect.DeepEqual(gotObj, tt.wantObj) {
-				t.Errorf("GetRenderedResource() obj = %v, want %v", gotObj, tt.wantObj)
-			}
-		})
-	}
-}
-
 func Test_Synchronize(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -2326,7 +2235,11 @@ func Test_IsResourceReady(t *testing.T) {
 		{
 			name: "multiple expressions all true",
 			resource: newTestResource(
-				withReadyExpressions([]string{"test.status.ready", "test.status.healthy && test.status.count > 10", "test.status.count > 5"}),
+				withReadyExpressions([]string{
+					"test.status.ready",
+					"test.status.healthy && test.status.count > 10",
+					"test.status.count > 5",
+				}),
 			),
 			resolvedObject: map[string]interface{}{
 				"status": map[string]interface{}{
@@ -2378,7 +2291,7 @@ func Test_IsResourceReady(t *testing.T) {
 		})
 	}
 }
-func Test_WantToCreateResource(t *testing.T) {
+func Test_ReadyToProcessResource(t *testing.T) {
 	tests := []struct {
 		name         string
 		resource     Resource
@@ -2391,21 +2304,21 @@ func Test_WantToCreateResource(t *testing.T) {
 		{
 			name: "no conditions",
 			resource: newTestResource(
-				withConditions(nil),
+				withIncludeWhenExpressions(nil),
 			),
 			want: true,
 		},
 		{
 			name: "simple true condition",
 			resource: newTestResource(
-				withConditions([]string{"true"}),
+				withIncludeWhenExpressions([]string{"true"}),
 			),
 			want: true,
 		},
 		{
 			name: "simple false condition",
 			resource: newTestResource(
-				withConditions([]string{"false"}),
+				withIncludeWhenExpressions([]string{"false"}),
 			),
 			want:     false,
 			wantSkip: true,
@@ -2413,7 +2326,7 @@ func Test_WantToCreateResource(t *testing.T) {
 		{
 			name: "spec based condition",
 			resource: newTestResource(
-				withConditions([]string{"schema.spec.enabled == true"}),
+				withIncludeWhenExpressions([]string{"schema.spec.enabled == true"}),
 			),
 			instanceSpec: map[string]interface{}{
 				"enabled": true,
@@ -2431,21 +2344,21 @@ func Test_WantToCreateResource(t *testing.T) {
 		{
 			name: "invalid expression",
 			resource: newTestResource(
-				withConditions([]string{"invalid )"}),
+				withIncludeWhenExpressions([]string{"invalid )"}),
 			),
 			wantErr: true,
 		},
 		{
 			name: "multiple conditions all true",
 			resource: newTestResource(
-				withConditions([]string{"true", "1 == 1"}),
+				withIncludeWhenExpressions([]string{"true", "1 == 1"}),
 			),
 			want: true,
 		},
 		{
 			name: "multiple conditions one false",
 			resource: newTestResource(
-				withConditions([]string{"true", "false"}),
+				withIncludeWhenExpressions([]string{"true", "false"}),
 			),
 			want:     false,
 			wantSkip: true,
@@ -2466,25 +2379,25 @@ func Test_WantToCreateResource(t *testing.T) {
 				},
 			}
 
-			got, err := rt.WantToCreateResource("test")
+			got, err := rt.ReadyToProcessResource("test")
 			if tt.wantErr {
 				if err == nil {
-					t.Error("WantToCreateResource() expected error, got none")
+					t.Error("ReadyToProcessResource() expected error, got none")
 				}
 				return
 			}
 			if tt.wantSkip {
-				if err == nil || !strings.Contains(err.Error(), "Skipping resource creation due to condition") {
-					t.Errorf("WantToCreateResource() expected skip message, got %v", err)
+				if err == nil || !strings.Contains(err.Error(), "skipping resource creation due to condition") {
+					t.Errorf("ReadyToProcessResource() expected skip message, got %v", err)
 				}
 				return
 			}
 			if err != nil {
-				t.Errorf("WantToCreateResource() unexpected error = %v", err)
+				t.Errorf("ReadyToProcessResource() unexpected error = %v", err)
 				return
 			}
 			if got != tt.want {
-				t.Errorf("WantToCreateResource() = %v, want %v", got, tt.want)
+				t.Errorf("ReadyToProcessResource() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -2608,6 +2521,30 @@ func Test_evaluateExpression(t *testing.T) {
 			expression: "undefined.value",
 			wantErr:    true,
 		},
+		{
+			name: "unsupported type in expression",
+			context: map[string]interface{}{
+				"data": map[string]interface{}{
+					"value": map[int]interface{}{
+						1: "one",
+					},
+				},
+			},
+			expression: "data.value",
+			wantErr:    true,
+		},
+		{
+			name: "unsupported type in optional expression",
+			context: map[string]interface{}{
+				"data": map[string]interface{}{
+					"value": map[int]interface{}{
+						1: "one",
+					},
+				},
+			},
+			expression: "data.?value",
+			wantErr:    true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -2617,7 +2554,7 @@ func Test_evaluateExpression(t *testing.T) {
 				t.Errorf("evaluateExpression() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if err == nil && got != tt.want {
+			if err == nil && !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("evaluateExpression() = %v, want %v", got, tt.want)
 			}
 		})
@@ -2704,14 +2641,14 @@ func Test_containsAllElements(t *testing.T) {
 }
 
 type mockResource struct {
-	gvr              schema.GroupVersionResource
-	variables        []*variable.ResourceField
-	dependencies     []string
-	readyExpressions []string
-	conditions       []string
-	topLevelFields   []string
-	namespaced       bool
-	obj              *unstructured.Unstructured
+	gvr                    schema.GroupVersionResource
+	variables              []*variable.ResourceField
+	dependencies           []string
+	readyExpressions       []string
+	includeWhenExpressions []string
+	namespaced             bool
+	isExternalRef          bool
+	obj                    *unstructured.Unstructured
 }
 
 func newMockResource() *mockResource {
@@ -2739,11 +2676,7 @@ func (m *mockResource) GetReadyWhenExpressions() []string {
 }
 
 func (m *mockResource) GetIncludeWhenExpressions() []string {
-	return m.conditions
-}
-
-func (m *mockResource) GetTopLevelFields() []string {
-	return m.topLevelFields
+	return m.includeWhenExpressions
 }
 
 func (m *mockResource) IsNamespaced() bool {
@@ -2752,6 +2685,10 @@ func (m *mockResource) IsNamespaced() bool {
 
 func (m *mockResource) Unstructured() *unstructured.Unstructured {
 	return m.obj
+}
+
+func (m *mockResource) IsExternalRef() bool {
+	return m.isExternalRef
 }
 
 type mockResourceOption func(*mockResource)
@@ -2784,15 +2721,9 @@ func withReadyExpressions(exprs []string) mockResourceOption {
 	}
 }
 
-func withConditions(conditions []string) mockResourceOption {
+func withIncludeWhenExpressions(exprs []string) mockResourceOption {
 	return func(m *mockResource) {
-		m.conditions = conditions
-	}
-}
-
-func withTopLevelFields(fields []string) mockResourceOption {
-	return func(m *mockResource) {
-		m.topLevelFields = fields
+		m.includeWhenExpressions = exprs
 	}
 }
 
