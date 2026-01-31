@@ -109,9 +109,9 @@ func (f *Function) RunFunction(_ context.Context, req *fnv1.RunFunctionRequest) 
 		return rsp, nil
 	}
 
-	rt, err := g.NewGraphRuntime(&oxr.Resource.Unstructured)
+	rt, err := runtime.FromGraph(g, &oxr.Resource.Unstructured)
 	if err != nil {
-		response.Fatal(rsp, errors.Wrap(err, "cannot get graph runtime"))
+		response.Fatal(rsp, errors.Wrap(err, "cannot create graph runtime"))
 		return rsp, nil
 	}
 
@@ -121,14 +121,35 @@ func (f *Function) RunFunction(_ context.Context, req *fnv1.RunFunctionRequest) 
 		return rsp, nil
 	}
 
-	ready := make(map[string]bool)
+	// Build a map from node ID to node for fast lookups.
+	nodesByID := make(map[string]*runtime.Node)
+	for _, node := range rt.Nodes() {
+		nodesByID[node.Spec.Meta.ID] = node
+	}
 
+	// Set observed state on each node from observed composed resources.
+	// For single resources, the composed resource name equals the node ID.
+	// For collections, multiple resources map to the same node ID (handled later).
+	ready := make(map[string]bool)
 	for name, r := range ocds {
 		id := string(name)
-		rt.SetResource(id, &r.Resource.Unstructured)
+		node, ok := nodesByID[id]
+		if !ok {
+			// This resource doesn't match any node - might be from a different function
+			// or a stale resource. Skip it.
+			f.log.Debug("Observed resource has no matching node", "name", name)
+			continue
+		}
 
-		if isReady, reason, err := rt.IsResourceReady(id); err != nil || !isReady {
-			f.log.Info("Resource isn't ready yet", "id", id, "reason", reason, "err", err)
+		node.SetObserved([]*unstructured.Unstructured{&r.Resource.Unstructured})
+
+		isReady, err := node.IsReady()
+		if err != nil {
+			f.log.Info("Error checking resource readiness", "id", id, "err", err)
+			continue
+		}
+		if !isReady {
+			f.log.Debug("Resource isn't ready yet", "id", id)
 			continue
 		}
 
@@ -141,36 +162,52 @@ func (f *Function) RunFunction(_ context.Context, req *fnv1.RunFunctionRequest) 
 		return rsp, nil
 	}
 
-	for _, id := range rt.TopologicalOrder() {
-		if want, err := rt.ReadyToProcessResource(id); err != nil || !want {
-			f.log.Info("Skipping resource", "id", id, "err", err)
-			rt.IgnoreResource(id)
+	// Process nodes in topological order, generating desired state.
+	for _, node := range rt.Nodes() {
+		id := node.Spec.Meta.ID
+
+		// Check if this node should be ignored (includeWhen evaluated to false).
+		ignored, err := node.IsIgnored()
+		if err != nil {
+			f.log.Info("Error checking if resource is ignored", "id", id, "err", err)
+			continue
+		}
+		if ignored {
+			f.log.Debug("Skipping ignored resource", "id", id)
 			continue
 		}
 
-		// Use GetRenderedResource to get the template with CEL expressions
-		// resolved, rather than GetResource which returns observed state.
+		// Get the desired state with CEL expressions resolved.
 		// This is critical for SSA - desired state must only contain fields
 		// we want to own, not provider-defaulted fields from observed state.
-		r, state := rt.GetRenderedResource(id)
-		if state != runtime.ResourceStateResolved {
-			f.log.Info("Skipping unresolved resource", "id", id, "state", state)
-			continue
-		}
-
-		cd, err := composed.From(r)
+		desired, err := node.GetDesired()
 		if err != nil {
-			response.Fatal(rsp, errors.Wrapf(err, "cannot create composed resource from template id %s", id))
+			if runtime.IsDataPending(err) {
+				f.log.Debug("Skipping resource with pending data", "id", id)
+				continue
+			}
+			response.Fatal(rsp, errors.Wrapf(err, "cannot get desired state for resource %q", id))
 			return rsp, nil
-		}
-		dcds[resource.Name(id)] = &resource.DesiredComposed{Resource: cd, Ready: resource.ReadyFalse}
-		if ready[id] {
-			dcds[resource.Name(id)].Ready = resource.ReadyTrue
 		}
 
-		if _, err := rt.Synchronize(); err != nil {
-			response.Fatal(rsp, errors.Wrap(err, "cannot synchronize instance"))
-			return rsp, nil
+		// For single resources, desired has one element.
+		// For collections, desired has multiple elements (one per forEach expansion).
+		for i, r := range desired {
+			resourceName := id
+			if len(desired) > 1 {
+				// Collection: append index to make unique resource names
+				resourceName = id + "-" + string(rune('0'+i))
+			}
+
+			cd, err := composed.From(r)
+			if err != nil {
+				response.Fatal(rsp, errors.Wrapf(err, "cannot create composed resource from template id %s", id))
+				return rsp, nil
+			}
+			dcds[resource.Name(resourceName)] = &resource.DesiredComposed{Resource: cd, Ready: resource.ReadyFalse}
+			if ready[id] {
+				dcds[resource.Name(resourceName)].Ready = resource.ReadyTrue
+			}
 		}
 	}
 
@@ -181,24 +218,36 @@ func (f *Function) RunFunction(_ context.Context, req *fnv1.RunFunctionRequest) 
 
 	// Build a minimal desired XR containing only the status paths declared in
 	// the ResourceGraph. This is critical for SSA - we must only include fields
-	// we want to own. The runtime's GetInstance() returns the full observed XR
-	// with status fields mutated in-place, but including all of those fields
-	// would cause the function to claim SSA ownership of every field.
+	// we want to own. The runtime uses soft resolution for instance status,
+	// returning only fields where all CEL expressions were successfully resolved.
 	dxr := &composite.Unstructured{Unstructured: unstructured.Unstructured{Object: map[string]any{}}}
 	dxr.SetAPIVersion(oxr.Resource.GetAPIVersion())
 	dxr.SetKind(oxr.Resource.GetKind())
 
-	src := fieldpath.Pave(rt.GetInstance().Object)
-	dst := fieldpath.Pave(dxr.Object)
-	for _, v := range g.Instance.GetVariables() {
-		val, err := src.GetValue(v.Path)
-		if err != nil {
-			// Value not resolved yet (CEL dependency not satisfied), skip it.
-			continue
-		}
-		if err := dst.SetValue(v.Path, val); err != nil {
-			response.Fatal(rsp, errors.Wrapf(err, "cannot set desired XR status field %q", v.Path))
-			return rsp, nil
+	// Get the resolved status fields from the instance node.
+	// GetDesired on the instance node uses soft resolution - it returns partial
+	// results when some expressions can't be evaluated yet.
+	instanceDesired, err := rt.Instance().GetDesired()
+	if err != nil {
+		// Errors from instance GetDesired are unexpected since it uses soft resolution.
+		response.Fatal(rsp, errors.Wrap(err, "cannot get desired instance status"))
+		return rsp, nil
+	}
+
+	// Copy resolved status fields to the desired XR.
+	if len(instanceDesired) > 0 && instanceDesired[0] != nil {
+		src := fieldpath.Pave(instanceDesired[0].Object)
+		dst := fieldpath.Pave(dxr.Object)
+		for _, v := range g.Instance.Variables {
+			val, err := src.GetValue(v.Path)
+			if err != nil {
+				// Value not resolved yet (CEL dependency not satisfied), skip it.
+				continue
+			}
+			if err := dst.SetValue(v.Path, val); err != nil {
+				response.Fatal(rsp, errors.Wrapf(err, "cannot set desired XR status field %q", v.Path))
+				return rsp, nil
+			}
 		}
 	}
 

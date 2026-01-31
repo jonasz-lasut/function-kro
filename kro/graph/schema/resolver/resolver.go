@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"time"
 
+	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apiextensions-apiserver/pkg/generated/openapi"
 	"k8s.io/apiserver/pkg/cel/openapi/resolver"
 	"k8s.io/client-go/discovery"
@@ -56,4 +57,44 @@ func NewCombinedResolver(clientConfig *rest.Config, httpClient *http.Client) (re
 
 	combinedResolver := coreResolver.Combine(cachedResolver)
 	return combinedResolver, nil
+}
+
+// NewCombinedResolverFromSchemas creates a schema resolver that combines
+// a schema map resolver (for Crossplane-provided schemas) with a core resolver
+// (for built-in Kubernetes types). This is the primary constructor for use
+// with Crossplane functions that receive OpenAPI schemas via required_schemas.
+func NewCombinedResolverFromSchemas(schemaMapResolver *SchemaMapResolver) resolver.SchemaResolver {
+	coreResolver := newCoreResolver()
+	// Combine: schema map first (Crossplane-provided), then core (built-in types).
+	return schemaMapResolver.Combine(coreResolver)
+}
+
+// NewCombinedResolverFromCRDs creates a schema resolver that combines
+// a CRD schema resolver (for schemas extracted from CRDs) with a core resolver
+// (for built-in Kubernetes types). This is the constructor for use with
+// Crossplane functions that receive CRDs via extra_resources.
+func NewCombinedResolverFromCRDs(crds []*extv1.CustomResourceDefinition) (resolver.SchemaResolver, error) {
+	crdResolver, err := NewCRDSchemaResolver(crds)
+	if err != nil {
+		return nil, err
+	}
+
+	coreResolver := newCoreResolver()
+
+	// Combine: CRD resolver first, then core (built-in types).
+	// We wrap the CRD resolver to implement the Combine pattern.
+	return &combinedResolver{
+		primary:  crdResolver,
+		fallback: coreResolver,
+	}, nil
+}
+
+// newCoreResolver creates a resolver for built-in Kubernetes types using
+// compiled-in OpenAPI definitions. This handles types like Deployment, Service,
+// ConfigMap, etc. that are part of the core Kubernetes API.
+func newCoreResolver() resolver.SchemaResolver {
+	return resolver.NewDefinitionsSchemaResolver(
+		openapi.GetOpenAPIDefinitions,
+		scheme.Scheme,
+	)
 }

@@ -25,12 +25,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/release-utils/version"
 
-	"github.com/upbound/function-kro/input/v1alpha1"
+	"github.com/upbound/function-kro/input/v1beta1"
 )
 
 const (
 	// LabelKROPrefix is the label key prefix used to identify KRO owned resources.
-	LabelKROPrefix = v1alpha1.KRODomainName + "/"
+	LabelKROPrefix = v1beta1.KRODomainName + "/"
 )
 
 const (

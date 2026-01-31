@@ -16,53 +16,39 @@ package graph
 
 import (
 	"fmt"
-	"net/http"
 	"slices"
 	"strings"
 
 	"github.com/google/cel-go/cel"
 	"golang.org/x/exp/maps"
-	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/apiserver/pkg/cel/openapi"
 	"k8s.io/apiserver/pkg/cel/openapi/resolver"
-	"k8s.io/client-go/rest"
 	"k8s.io/kube-openapi/pkg/validation/spec"
-	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
-	"github.com/upbound/function-kro/input/v1alpha1"
+	"github.com/upbound/function-kro/input/v1beta1"
 	krocel "github.com/upbound/function-kro/kro/cel"
 	"github.com/upbound/function-kro/kro/cel/ast"
-	"github.com/upbound/function-kro/kro/graph/crd"
 	"github.com/upbound/function-kro/kro/graph/dag"
 	"github.com/upbound/function-kro/kro/graph/fieldpath"
 	"github.com/upbound/function-kro/kro/graph/parser"
-	"github.com/upbound/function-kro/kro/graph/schema"
-	schemaresolver "github.com/upbound/function-kro/kro/graph/schema/resolver"
+	kroschema "github.com/upbound/function-kro/kro/graph/schema"
 	"github.com/upbound/function-kro/kro/graph/variable"
 	"github.com/upbound/function-kro/kro/metadata"
-	"github.com/upbound/function-kro/kro/simpleschema"
 )
 
-// NewBuilder creates a new GraphBuilder instance.
-func NewBuilder(clientConfig *rest.Config, httpClient *http.Client) (*Builder, error) {
-	schemaResolver, err := schemaresolver.NewCombinedResolver(clientConfig, httpClient)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create schema resolver: %w", err)
-	}
-
-	rm, err := apiutil.NewDynamicRESTMapper(clientConfig, httpClient)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create dynamic REST mapper: %w", err)
-	}
-
-	rgBuilder := &Builder{
+// NewBuilder creates a new GraphBuilder instance from a SchemaResolver and RESTMapper.
+//
+// This is the constructor for use with Crossplane functions. The resolver provides
+// schema resolution for GVKs, and the restMapper (optional) provides GVK to GVR mapping.
+// If restMapper is nil, a convention-based fallback is used (pluralize kind, assume namespaced).
+func NewBuilder(schemaResolver resolver.SchemaResolver, restMapper meta.RESTMapper) *Builder {
+	return &Builder{
 		schemaResolver: schemaResolver,
-		restMapper:     rm,
+		restMapper:     restMapper,
 	}
-	return rgBuilder, nil
 }
 
 // Builder is an object that is responsible for constructing and managing
@@ -72,36 +58,32 @@ func NewBuilder(clientConfig *rest.Config, httpClient *http.Client) (*Builder, e
 //
 // The GraphBuild performs several key functions:
 //
-//	  1/ It validates the resource definitions and their naming conventions.
-//	  2/ It interacts with the API Server to retrieve the OpenAPI schema for the
-//	     resources, and validates the resources against the schema.
-//	  3/ Extracts and processes the CEL expressions from the resources definitions.
-//	  4/ Builds the dependency graph between the resources, by inspecting the CEL
-//		    expressions.
-//	  5/ It infers and generates the schema for the instance resource, based on the
-//			SimpleSchema format.
+//  1. It validates the resource definitions and their naming conventions.
+//  2. It resolves the OpenAPI schema for resources and validates against schema.
+//  3. Extracts and processes the CEL expressions from the resources definitions.
+//  4. Builds the dependency graph between the resources, by inspecting the CEL expressions.
 //
 // If any of the above steps fail, the Builder will return an error.
 //
-// The resulting ResourceGraphDefinition object is a fully processed and validated
-// representation of a resource graph definition CR, it's underlying resources, and the
-// relationships between the resources. This object can be used to instantiate
-// a "runtime" data structure that can be used to create the resources in the
-// cluster.
+// The resulting Graph object is a fully processed and validated representation
+// of a resource graph definition, it's underlying resources, and the relationships
+// between the resources. This object can be used to instantiate a "runtime" data
+// structure that can be used to create the resources in the cluster.
 type Builder struct {
 	// schemaResolver is used to resolve the OpenAPI schema for the resources.
 	schemaResolver resolver.SchemaResolver
 	restMapper     meta.RESTMapper
 }
 
-// NewResourceGraphDefinition creates a new ResourceGraphDefinition object from the given ResourceGraphDefinition
-// CRD. The ResourceGraphDefinition object is a fully processed and validated representation
-// of the resource graph definition CRD, it's underlying resources, and the relationships between
-// the resources.
-func (b *Builder) NewResourceGraphDefinition(originalCR *v1alpha1.ResourceGraphDefinition) (*Graph, error) {
-	// Before anything else, let's copy the resource graph definition to avoid modifying the
+// NewResourceGraphDefinition creates a new Graph from a ResourceGraph input and XR schema.
+// This is the entry point for Crossplane functions that receive schemas via required_schemas.
+//
+// The xrSchema parameter should be the OpenAPI schema for the composite resource (XR),
+// typically obtained from Crossplane's required_schemas response.
+func (b *Builder) NewResourceGraphDefinition(rg *v1beta1.ResourceGraph, xrSchema *spec.Schema) (*Graph, error) {
+	// Before anything else, let's copy the resource graph to avoid modifying the
 	// original object.
-	rgd := originalCR.DeepCopy()
+	rgd := rg.DeepCopy()
 
 	// There are a few steps to build a resource graph definition:
 	// 1. Validate the naming convention of the resource graph definition and its resources.
@@ -110,9 +92,9 @@ func (b *Builder) NewResourceGraphDefinition(originalCR *v1alpha1.ResourceGraphD
 	//    that the names of the resources are valid to be used in CEL expressions.
 	//    for example name-something-something is not a valid name for a resource,
 	//    because in CEL - is a subtraction operator.
-	err := validateResourceGraphDefinitionNamingConventions(rgd)
+	err := validateResourceIDs(rgd)
 	if err != nil {
-		return nil, fmt.Errorf("failed to validate resourcegraphdefinition: %w", err)
+		return nil, fmt.Errorf("failed to validate resource graph: %w", err)
 	}
 
 	// Now that we did a basic validation of the resource graph definition, we can start understanding
@@ -130,7 +112,7 @@ func (b *Builder) NewResourceGraphDefinition(originalCR *v1alpha1.ResourceGraphD
 	// Schemas are only needed during build for CEL validation.
 	nodes := make(map[string]*Node)
 	schemas := make(map[string]*spec.Schema)
-	for i, rgResource := range rgd.Spec.Resources {
+	for i, rgResource := range rgd.Resources {
 		id := rgResource.ID
 		node, nodeSchema, err := b.buildRGResource(rgResource, i)
 		if err != nil {
@@ -151,49 +133,11 @@ func (b *Builder) NewResourceGraphDefinition(originalCR *v1alpha1.ResourceGraphD
 	// the shape of the instance resource (Mainly trying to understand the instance
 	// resource schema) to help validating the CEL expressions that are pointing to
 	// the instance resource e.g ${schema.spec.something.something}.
-	//
-	// You might wonder why are we building the resources before the instance resource?
-	// That's because the instance status schema is inferred from the CEL expressions
-	// in the status field of the instance resource. Those CEL expressions refer to
-	// the resources defined in the resource graph definition. Hence, we need to build the resources
-	// first, to be able to generate a proper schema for the instance status.
 
-	//
-
-	// Next, we need to understand the instance definition. The instance is
-	// the resource users will create in their cluster, to request the creation of
-	// the resources defined in the resource graph definition.
-	//
-	// The instance resource is a Kubernetes resource, differently from typical
-	// CRDs, users define the schema of the instance resource using the "SimpleSchema"
-	// format. This format is a simplified version of the OpenAPI schema, that only
-	// supports a subset of the features.
-	//
-	// SimpleSchema is a new standard we created to simplify CRD declarations, it is
-	// very useful when we need to define the Spec of a CRD, when it comes to defining
-	// the status of a CRD, we use CEL expressions. `kro` inspects the CEL expressions
-	// to infer the types of the status fields, and generate the OpenAPI schema for the
-	// status field. The CEL expressions are also used to patch the status field of the
-	// instance.
-	//
-	// We need to:
-	// 1. Parse the instance spec fields adhering to the SimpleSchema format.
-	// 2. Extract CEL expressions from the status
-	// 3. Validate them against the resources defined in the resource graph definition.
-	// 4. Infer the status schema based on the CEL expressions.
-
-	instance, instanceCRD, err := b.buildInstanceNode(
-		rgd.Spec.Schema.Group,
-		rgd.Spec.Schema.APIVersion,
-		rgd.Spec.Schema.Kind,
-		rgd.Spec.Schema,
-		// We need to pass the nodes and schemas to the instance, so we can validate
-		// the CEL expressions in the context of the resources.
-		nodes,
-		schemas,
-	)
+	// Build the instance resource from the provided XR schema and status CEL expressions.
+	instance, err := b.buildInstanceNode(xrSchema, rgd, nodes, schemas)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build resourcegraphdefinition '%v': %w", rgd.Name, err)
+		return nil, fmt.Errorf("failed to build instance node: %w", err)
 	}
 
 	// Prepare schemas for CEL type checking.
@@ -205,10 +149,7 @@ func (b *Builder) NewResourceGraphDefinition(originalCR *v1alpha1.ResourceGraphD
 	//
 	// not that we only include the spec and metadata fields, instance status references
 	// are not allowed in RGDs (yet)
-	schemaWithoutStatus, err := getSchemaWithoutStatus(instanceCRD)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get schema without status: %w", err)
-	}
+	schemaWithoutStatus := getSchemaWithoutStatus(xrSchema)
 	celSchemas[SchemaVarName] = schemaWithoutStatus
 
 	// Create a DeclTypeProvider for introspecting type structures during validation
@@ -263,14 +204,13 @@ func (b *Builder) NewResourceGraphDefinition(originalCR *v1alpha1.ResourceGraphD
 		Nodes:            nodes,
 		Resources:        nodes,
 		TopologicalOrder: topologicalOrder,
-		CRD:              instanceCRD,
 	}
 	return resourceGraphDefinition, nil
 }
 
 // buildExternalRefResource builds an empty resource with metadata from the given externalRef definition.
 func (b *Builder) buildExternalRefResource(
-	externalRef *v1alpha1.ExternalRef) map[string]interface{} {
+	externalRef *v1beta1.ExternalRef) map[string]interface{} {
 	resourceObject := map[string]interface{}{}
 	resourceObject["apiVersion"] = externalRef.APIVersion
 	resourceObject["kind"] = externalRef.Kind
@@ -290,7 +230,7 @@ func (b *Builder) buildExternalRefResource(
 // from the schema.
 // Returns the Node and the OpenAPI schema (schema is only needed during build for CEL validation).
 func (b *Builder) buildRGResource(
-	rgResource *v1alpha1.Resource,
+	rgResource *v1beta1.Resource,
 	order int,
 ) (*Node, *spec.Schema, error) {
 	// 1. Validate resource field combinations.
@@ -327,15 +267,24 @@ func (b *Builder) buildRGResource(
 		return nil, nil, fmt.Errorf("failed to get schema for resource %s: %w", rgResource.ID, err)
 	}
 
-	mapping, err := b.restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get REST mapping for resource %s: %w", rgResource.ID, err)
+	// 6. Get REST mapping for GVR and namespace scope.
+	// Use convention-based fallback if restMapper is nil.
+	var gvr = gvk.GroupVersion().WithResource(strings.ToLower(gvk.Kind) + "s")
+	var namespaced = true
+	if b.restMapper != nil {
+		mapping, err := b.restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get REST mapping for resource %s: %w", rgResource.ID, err)
+		}
+		gvr = mapping.Resource
+		namespaced = mapping.Scope.Name() == meta.RESTScopeNameNamespace
 	}
-	if err := validateTemplateConstraints(rgResource, resourceObject, mapping.Scope.Name() == meta.RESTScopeNameNamespace); err != nil {
+
+	if err := validateTemplateConstraints(rgResource, resourceObject, namespaced); err != nil {
 		return nil, nil, err
 	}
 
-	// 6. Extract CEL fieldDescriptors from the resource.
+	// 7. Extract CEL fieldDescriptors from the resource.
 	var fieldDescriptors []variable.FieldDescriptor
 	if gvk.Group == "apiextensions.k8s.io" && gvk.Version == "v1" && gvk.Kind == "CustomResourceDefinition" {
 		fieldDescriptors, err = parser.ParseSchemalessResource(resourceObject)
@@ -369,19 +318,19 @@ func (b *Builder) buildRGResource(
 		})
 	}
 
-	// 7. Parse ReadyWhen expressions
+	// 8. Parse ReadyWhen expressions
 	readyWhen, err := parser.ParseConditionExpressions(rgResource.ReadyWhen)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse readyWhen expressions: %v", err)
 	}
 
-	// 8. Parse condition expressions
+	// 9. Parse condition expressions
 	includeWhen, err := parser.ParseConditionExpressions(rgResource.IncludeWhen)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse includeWhen expressions: %v", err)
 	}
 
-	// 9. Parse forEach dimensions
+	// 10. Parse forEach dimensions
 	forEachDimensions, err := parseForEachDimensions(rgResource.ForEach)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse forEach dimensions: %v", err)
@@ -401,8 +350,8 @@ func (b *Builder) buildRGResource(
 			ID:         rgResource.ID,
 			Index:      order,
 			Type:       nodeType,
-			GVR:        mapping.Resource,
-			Namespaced: mapping.Scope.Name() == meta.RESTScopeNameNamespace,
+			GVR:        gvr,
+			Namespaced: namespaced,
 			// Dependencies will be set by buildDependencyGraph
 		},
 		Template:    &unstructured.Unstructured{Object: resourceObject},
@@ -581,81 +530,78 @@ func extractForEachDependencies(
 	return allDeps, nil
 }
 
-// buildInstanceNode builds the instance node. The instance node is
-// the representation of the CR that users will create in their cluster to request
-// the creation of the resources defined in the resource graph definition.
-//
-// Since instances are defined using the "SimpleSchema" format, we use a different
-// approach to build the instance node. Returns the node and the generated CRD.
+// buildInstanceNode builds the instance node from the XR schema and status CEL expressions.
+// This is a simplified version for Crossplane functions where the XR schema is provided
+// directly rather than being built from SimpleSchema.
 func (b *Builder) buildInstanceNode(
-	group, apiVersion, kind string,
-	rgDefinition *v1alpha1.Schema,
+	xrSchema *spec.Schema,
+	rgd *v1beta1.ResourceGraph,
 	nodes map[string]*Node,
 	nodeSchemas map[string]*spec.Schema,
-) (*Node, *extv1.CustomResourceDefinition, error) {
-	// The instance resource is the resource users will create in their cluster,
-	// to request the creation of the resources defined in the resource graph definition.
-	//
-	// The instance resource is a Kubernetes resource, differently from typical
-	// CRDs; it doesn't have an OpenAPI schema. Instead, it has a schema defined
-	// using the "SimpleSchema" format, a new standard we created to simplify
-	// CRD declarations.
-
-	// The instance resource is a Kubernetes resource, so it has a GroupVersionKind.
-	gvr := metadata.GetResourceGraphDefinitionInstanceGVR(group, apiVersion, kind)
-
-	// The instance resource has a schema defined using the "SimpleSchema" format.
-	instanceSpecSchema, err := buildInstanceSpecSchema(rgDefinition)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to build OpenAPI schema for instance: %w", err)
-	}
-
-	instanceStatusSchema, statusVariables, statusTemplate, err := buildStatusSchema(rgDefinition, nodes, nodeSchemas)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to build OpenAPI schema for instance status: %w", err)
-	}
-
-	// Synthesize the CRD for the instance resource.
-	overrideStatusFields := true
-	instanceCRD := crd.SynthesizeCRD(group, apiVersion, kind, *instanceSpecSchema, *instanceStatusSchema, overrideStatusFields, rgDefinition)
-
-	nodeNames := maps.Keys(nodes)
-	env, err := krocel.DefaultEnvironment(krocel.WithResourceIDs(nodeNames))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create CEL environment: %w", err)
-	}
-
-	// Collect dependencies for instance status fields
+) (*Node, error) {
+	// Parse status CEL expressions if provided
+	statusVariables := []*variable.ResourceField{}
+	var statusTemplate map[string]interface{}
 	var instanceDeps []string
-	instanceStatusVariables := []*variable.ResourceField{}
-	for _, statusVariable := range statusVariables {
-		// These variables need to be injected into the status field of the instance.
-		path := "status." + statusVariable.Path
-		statusVariable.Path = path
 
-		// Extract dependencies from ALL expressions in the field (for multi-expression templates)
-		var resourceDeps []string
-		for _, expr := range statusVariable.Expressions {
-			deps, _, err := extractDependencies(env, expr, nodeNames, nil)
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed to extract dependencies from expression %q: %w", expr, err)
-			}
-			for _, dep := range deps {
-				if !slices.Contains(resourceDeps, dep) {
-					resourceDeps = append(resourceDeps, dep)
+	if len(rgd.Status.Raw) > 0 {
+		unstructuredStatus := map[string]interface{}{}
+		err := yaml.UnmarshalStrict(rgd.Status.Raw, &unstructuredStatus)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal status schema: %w", err)
+		}
+		statusTemplate = unstructuredStatus
+
+		fieldDescriptors, err := parser.ParseSchemalessResource(unstructuredStatus)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract CEL expressions from status: %w", err)
+		}
+
+		nodeNames := maps.Keys(nodes)
+		env, err := krocel.DefaultEnvironment(krocel.WithResourceIDs(nodeNames))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create CEL environment: %w", err)
+		}
+
+		// Collect dependencies for instance status fields
+		for _, fd := range fieldDescriptors {
+			path := "status." + fd.Path
+			fd.Path = path
+
+			// Extract dependencies from ALL expressions in the field (for multi-expression templates)
+			var resourceDeps []string
+			for _, expr := range fd.Expressions {
+				deps, _, err := extractDependencies(env, expr, nodeNames, nil)
+				if err != nil {
+					return nil, fmt.Errorf("failed to extract dependencies from expression %q: %w", expr, err)
+				}
+				for _, dep := range deps {
+					if !slices.Contains(resourceDeps, dep) {
+						resourceDeps = append(resourceDeps, dep)
+					}
 				}
 			}
-		}
-		if len(resourceDeps) == 0 {
-			return nil, nil, fmt.Errorf("instance status field must refer to a resource: %s", statusVariable.Path)
-		}
-		instanceDeps = append(instanceDeps, resourceDeps...)
+			if len(resourceDeps) == 0 {
+				return nil, fmt.Errorf("instance status field must refer to a resource: %s", fd.Path)
+			}
+			instanceDeps = append(instanceDeps, resourceDeps...)
 
-		instanceStatusVariables = append(instanceStatusVariables, &variable.ResourceField{
-			FieldDescriptor: statusVariable,
-			Kind:            variable.ResourceVariableKindDynamic,
-			Dependencies:    resourceDeps,
-		})
+			statusVariables = append(statusVariables, &variable.ResourceField{
+				FieldDescriptor: fd,
+				Kind:            variable.ResourceVariableKindDynamic,
+				Dependencies:    resourceDeps,
+			})
+		}
+	}
+
+	// Deduplicate instance dependencies.
+	var uniqueInstanceDeps []string
+	seen := make(map[string]bool)
+	for _, dep := range instanceDeps {
+		if !seen[dep] {
+			seen[dep] = true
+			uniqueInstanceDeps = append(uniqueInstanceDeps, dep)
+		}
 	}
 
 	// Create the instance node.
@@ -664,123 +610,18 @@ func (b *Builder) buildInstanceNode(
 		Meta: NodeMeta{
 			ID:           InstanceNodeID,
 			Type:         NodeTypeInstance,
-			GVR:          gvr,
 			Namespaced:   true, // Instances are always namespaced
-			Dependencies: instanceDeps,
+			Dependencies: uniqueInstanceDeps,
 		},
 		Template: &unstructured.Unstructured{
 			Object: map[string]interface{}{
 				"status": statusTemplate,
 			},
 		},
-		Variables: instanceStatusVariables,
+		Variables: statusVariables,
 	}
 
-	return instance, instanceCRD, nil
-}
-
-// buildInstanceSpecSchema builds the instance spec schema that will be
-// used to generate the CRD for the instance resource. The instance spec
-// schema is expected to be defined using the "SimpleSchema" format.
-func buildInstanceSpecSchema(rgSchema *v1alpha1.Schema) (*extv1.JSONSchemaProps, error) {
-	// We need to unmarshal the instance schema to a map[string]interface{} to
-	// make it easier to work with.
-	instanceSpec := map[string]interface{}{}
-	err := yaml.UnmarshalStrict(rgSchema.Spec.Raw, &instanceSpec)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal spec schema: %w", err)
-	}
-
-	// Also the custom types must be unmarshalled to a map[string]interface{} to
-	// make handling easier.
-	customTypes := map[string]interface{}{}
-	err = yaml.UnmarshalStrict(rgSchema.Types.Raw, &customTypes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal predefined types: %w", err)
-	}
-
-	// The instance resource has a schema defined using the "SimpleSchema" format.
-	instanceSchema, err := simpleschema.ToOpenAPISpec(instanceSpec, customTypes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build OpenAPI schema for instance: %v", err)
-	}
-
-	return instanceSchema, nil
-}
-
-// buildStatusSchema builds the status schema for the instance resource.
-// The status schema is inferred from the CEL expressions in the status field
-// using CEL type checking.
-// Returns: (schema, fieldDescriptors, statusTemplate, error)
-func buildStatusSchema(
-	rgSchema *v1alpha1.Schema,
-	nodes map[string]*Node,
-	nodeSchemas map[string]*spec.Schema,
-) (
-	*extv1.JSONSchemaProps,
-	[]variable.FieldDescriptor,
-	map[string]interface{},
-	error,
-) {
-	// The instance resource has a schema defined using the "SimpleSchema" format.
-	unstructuredStatus := map[string]interface{}{}
-	err := yaml.UnmarshalStrict(rgSchema.Status.Raw, &unstructuredStatus)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to unmarshal status schema: %w", err)
-	}
-
-	// Extract CEL expressions from the status field.
-	fieldDescriptors, err := parser.ParseSchemalessResource(unstructuredStatus)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to extract CEL expressions from status: %w", err)
-	}
-
-	schemas := collectNodeSchemas(nodes, nodeSchemas)
-
-	env, err := krocel.TypedEnvironment(schemas)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to create typed CEL environment: %w", err)
-	}
-
-	provider := krocel.CreateDeclTypeProvider(schemas)
-
-	// Infer types for each status field expression using CEL type checking
-	statusTypeMap := make(map[string]*cel.Type)
-	for _, fieldDescriptor := range fieldDescriptors {
-		if fieldDescriptor.StandaloneExpression {
-			// Single standalone expression - use its output type
-			expression := fieldDescriptor.Expressions[0]
-
-			checkedAST, err := parseAndCheckCELExpression(env, expression)
-			if err != nil {
-				return nil, nil, nil, fmt.Errorf("failed to type-check status expression %q at path %q: %w", expression, fieldDescriptor.Path, err)
-			}
-
-			statusTypeMap[fieldDescriptor.Path] = checkedAST.OutputType()
-		} else {
-			// String interpolation - validate all expressions and result is string
-			for _, expression := range fieldDescriptor.Expressions {
-				checkedAST, err := parseAndCheckCELExpression(env, expression)
-				if err != nil {
-					return nil, nil, nil, fmt.Errorf("failed to type-check status expression %q at path %q: %w", expression, fieldDescriptor.Path, err)
-				}
-
-				outputType := checkedAST.OutputType()
-				if err := validateExpressionType(outputType, cel.StringType, expression, "status", fieldDescriptor.Path, provider); err != nil {
-					return nil, nil, nil, err
-				}
-			}
-			statusTypeMap[fieldDescriptor.Path] = cel.StringType
-		}
-	}
-
-	// convert the CEL types to OpenAPI schema - best effort.
-	statusSchema, err := schema.GenerateSchemaFromCELTypes(statusTypeMap, provider)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to generate status schema from CEL types: %w", err)
-	}
-
-	return statusSchema, fieldDescriptors, unstructuredStatus, nil
+	return instance, nil
 }
 
 // extractDependencies extracts the dependencies from the given CEL expression.
@@ -833,7 +674,7 @@ func extractDependencies(env *cel.Env, expression string, resourceNames []string
 // parseForEachDimensions converts API forEach dimensions (map[string]string) to
 // ForEachDimension structs. Each API dimension is a single-entry map where
 // the key is the variable name and the value is the CEL expression.
-func parseForEachDimensions(apiDimensions []v1alpha1.ForEachDimension) ([]ForEachDimension, error) {
+func parseForEachDimensions(apiDimensions []v1beta1.ForEachDimension) ([]ForEachDimension, error) {
 	if len(apiDimensions) == 0 {
 		return nil, nil
 	}
@@ -1236,36 +1077,28 @@ func validateForEachExpressions(env *cel.Env, node *Node) (map[string]*cel.Type,
 	return iteratorTypes, nil
 }
 
-// getSchemaWithoutStatus returns a schema from the CRD with the status field removed.
-func getSchemaWithoutStatus(crd *extv1.CustomResourceDefinition) (*spec.Schema, error) {
-	crdCopy := crd.DeepCopy()
-
-	// TODO(a-hilaly) expand this function when we start support CRD upgrades.
-	if len(crdCopy.Spec.Versions) != 1 {
-		return nil, fmt.Errorf("expected CRD to have exactly one version, got %d versions: multi-version CRDs not yet supported", len(crdCopy.Spec.Versions))
-	}
-	if crdCopy.Spec.Versions[0].Schema == nil {
-		return nil, fmt.Errorf("expected CRD version to have schema defined, but schema is nil")
+// getSchemaWithoutStatus creates a copy of the schema with status removed and
+// metadata added. This is used for the "schema" CEL variable which should only
+// include spec fields (not status) but should include metadata for templating.
+func getSchemaWithoutStatus(schema *spec.Schema) *spec.Schema {
+	if schema == nil {
+		return nil
 	}
 
-	openAPISchema := crdCopy.Spec.Versions[0].Schema.OpenAPIV3Schema
+	// Deep copy the schema to avoid modifying the original
+	schemaCopy := kroschema.DeepCopySchema(schema)
 
-	if openAPISchema.Properties == nil {
-		openAPISchema.Properties = make(map[string]extv1.JSONSchemaProps)
+	if schemaCopy.Properties == nil {
+		schemaCopy.Properties = make(map[string]spec.Schema)
 	}
 
-	delete(openAPISchema.Properties, "status")
+	// Remove status property
+	delete(schemaCopy.Properties, "status")
 
-	specSchema, err := schema.ConvertJSONSchemaPropsToSpecSchema(openAPISchema)
-	if err != nil {
-		return nil, err
-	}
+	// Add metadata schema
+	schemaCopy.Properties["metadata"] = kroschema.ObjectMetaSchema
 
-	if specSchema.Properties == nil {
-		specSchema.Properties = make(map[string]spec.Schema)
-	}
-	specSchema.Properties["metadata"] = schema.ObjectMetaSchema
-	return specSchema, nil
+	return schemaCopy
 }
 
 // collectNodeSchemas builds a map of node IDs to their OpenAPI schemas.
@@ -1276,7 +1109,7 @@ func collectNodeSchemas(nodes map[string]*Node, nodeSchemas map[string]*spec.Sch
 	for id, node := range nodes {
 		if sch, ok := nodeSchemas[id]; ok {
 			if node.Meta.Type == NodeTypeCollection {
-				result[id] = schema.WrapSchemaAsList(sch)
+				result[id] = kroschema.WrapSchemaAsList(sch)
 			} else {
 				result[id] = sch
 			}

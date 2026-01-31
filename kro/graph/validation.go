@@ -21,7 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	"github.com/upbound/function-kro/input/v1alpha1"
+	"github.com/upbound/function-kro/input/v1beta1"
 )
 
 var (
@@ -103,20 +103,7 @@ func isKROReservedWord(word string) bool {
 	return reservedKeyWords.Has(word)
 }
 
-// validateResourceGraphDefinitionNamingConventions validates the naming conventions of
-// the given resource graph definition.
-func validateResourceGraphDefinitionNamingConventions(rgd *v1alpha1.ResourceGraphDefinition) error {
-	if !isValidKindName(rgd.Spec.Schema.Kind) {
-		return fmt.Errorf("%s: kind '%s' is not a valid KRO kind name: must be UpperCamelCase", ErrNamingConvention, rgd.Spec.Schema.Kind)
-	}
-	err := validateResourceIDs(rgd)
-	if err != nil {
-		return fmt.Errorf("%s: %w", ErrNamingConvention, err)
-	}
-	return nil
-}
-
-// validateResource performs basic validation on a given resourcegraphdefinition.
+// validateResourceIDs performs basic validation on a given ResourceGraph.
 // It checks that there are no duplicate resource ids and that the
 // resource ids are conformant to the KRO naming convention.
 //
@@ -124,9 +111,9 @@ func validateResourceGraphDefinitionNamingConventions(rgd *v1alpha1.ResourceGrap
 // - The id should start with a lowercase letter.
 // - The id should only contain alphanumeric characters.
 // - Does not contain any special characters, underscores, or hyphens.
-func validateResourceIDs(rgd *v1alpha1.ResourceGraphDefinition) error {
+func validateResourceIDs(rgd *v1beta1.ResourceGraph) error {
 	seen := make(map[string]struct{})
-	for _, res := range rgd.Spec.Resources {
+	for _, res := range rgd.Resources {
 		if isKROReservedWord(res.ID) {
 			return fmt.Errorf("id %s is a reserved keyword in KRO", res.ID)
 		}
@@ -143,10 +130,10 @@ func validateResourceIDs(rgd *v1alpha1.ResourceGraphDefinition) error {
 
 	// Validate forEach iterators after collecting all resource IDs
 	resourceIDs := sets.NewString()
-	for _, res := range rgd.Spec.Resources {
+	for _, res := range rgd.Resources {
 		resourceIDs.Insert(res.ID)
 	}
-	for _, res := range rgd.Spec.Resources {
+	for _, res := range rgd.Resources {
 		if err := validateForEachDimensions(res, resourceIDs); err != nil {
 			return err
 		}
@@ -161,7 +148,7 @@ func validateResourceIDs(rgd *v1alpha1.ResourceGraphDefinition) error {
 // - Iterator names are not reserved keywords
 // - Iterator names do not conflict with resource IDs
 // - Iterator names are unique within the same resource
-func validateForEachDimensions(res *v1alpha1.Resource, resourceIDs sets.String) error {
+func validateForEachDimensions(res *v1beta1.Resource, resourceIDs sets.String) error {
 	//TODO: Validate a maximum number dimensions
 
 	if len(res.ForEach) == 0 {
@@ -244,7 +231,7 @@ func validateKubernetesVersion(version string) error {
 
 // validateCombinableResourceFields checks that certain fields in a resource
 // are not used together in an invalid combination, and that required fields are present.
-func validateCombinableResourceFields(res *v1alpha1.Resource) error {
+func validateCombinableResourceFields(res *v1beta1.Resource) error {
 	hasTemplate := len(res.Template.Raw) > 0 // Template is runtime.RawExtension (struct)
 	hasExternalRef := res.ExternalRef != nil // ExternalRef is a pointer
 
@@ -264,7 +251,7 @@ func validateCombinableResourceFields(res *v1alpha1.Resource) error {
 // Keep this small and focused on invariants that must hold regardless of CEL.
 //
 // TODO: We need more constraints here, e.g, you cannot set kro owned labels/annotations...
-func validateTemplateConstraints(rgResource *v1alpha1.Resource, resourceObject map[string]interface{}, namespaced bool) error {
+func validateTemplateConstraints(rgResource *v1beta1.Resource, resourceObject map[string]interface{}, namespaced bool) error {
 	if !namespaced {
 		_, found, err := unstructured.NestedFieldNoCopy(resourceObject, "metadata", "namespace")
 		if err != nil {

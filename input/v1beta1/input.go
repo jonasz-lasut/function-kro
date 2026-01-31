@@ -7,7 +7,15 @@ package v1beta1
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
+
+// KRODomainName is the base domain name for KRO resources.
+// This constant is used across the codebase for labels, finalizers, etc.
+const KRODomainName = "kro.run"
+
+// GroupVersion is group version used to register these objects.
+var GroupVersion = schema.GroupVersion{Group: "kro.fn.crossplane.io", Version: "v1beta1"}
 
 // This isn't a custom resource, in the sense that we never install its CRD.
 // It is a KRM-like object, so we generate a CRD to describe its schema.
@@ -55,6 +63,10 @@ type ExternalRef struct {
 	Metadata ExternalRefMetadata `json:"metadata"`
 }
 
+// ForEachDimension is a map with exactly one entry where the key is the iterator
+// variable name and the value is a CEL expression that returns a list.
+type ForEachDimension map[string]string
+
 // Resource represents a Kubernetes resource that is part of the ResourceGraph.
 // Each resource can either be created using a template or reference an existing resource.
 type Resource struct {
@@ -86,4 +98,10 @@ type Resource struct {
 	// If not specified, the resource is always included.
 	// +kubebuilder:validation:Optional
 	IncludeWhen []string `json:"includeWhen,omitempty"`
+
+	// ForEach expands this resource into a collection of resources.
+	// Each entry is a map with exactly one key-value pair where the key is the
+	// iterator variable name and the value is a CEL expression returning a list.
+	// +kubebuilder:validation:Optional
+	ForEach []ForEachDimension `json:"forEach,omitempty"`
 }

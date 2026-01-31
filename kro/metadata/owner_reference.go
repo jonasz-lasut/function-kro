@@ -19,12 +19,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/upbound/function-kro/input/v1alpha1"
+	"github.com/upbound/function-kro/input/v1beta1"
 )
 
 var (
 	KRORGOwnerReferenceKind       = "ResourceGraphDefinition"
-	KRORGOwnerReferenceAPIVersion = v1alpha1.GroupVersion.String()
+	KRORGOwnerReferenceAPIVersion = v1beta1.GroupVersion.String()
 )
 
 // NewResourceGraphDefinitionOwnerReference stamped on the CRD and RGIs
