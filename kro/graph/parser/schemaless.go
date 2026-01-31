@@ -19,7 +19,7 @@ import (
 	"strings"
 
 	"github.com/google/cel-go/cel"
-	"github.com/upbound/function-kro/kro/graph/variable"
+	"github.com/kubernetes-sigs/kro/pkg/graph/variable"
 )
 
 // ParseSchemalessResource extracts CEL expressions without a schema, this is useful
@@ -72,13 +72,12 @@ func parseSchemalessResource(resource interface{}, path string) ([]variable.Fiel
 				return nil, err
 			}
 			if len(expressions) > 0 {
-				// String template in schemaless parsing
-				// StandaloneExpression=false tells builder to set ExpectedType to cel.StringType
+				// String template in schemaless parsing - always produces string
 				expressionsFields = append(expressionsFields, variable.FieldDescriptor{
 					Expressions:          expressions,
-					ExpectedType:         nil, // Builder will set this to cel.StringType
+					ExpectedType:         cel.StringType,
 					Path:                 path,
-					StandaloneExpression: false, // String template - always string
+					StandaloneExpression: false,
 				})
 			}
 		}

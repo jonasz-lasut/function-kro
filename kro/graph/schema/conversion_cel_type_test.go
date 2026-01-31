@@ -18,7 +18,7 @@ import (
 	"testing"
 
 	"github.com/google/cel-go/cel"
-	krocel "github.com/upbound/function-kro/kro/cel"
+	krocel "github.com/kubernetes-sigs/kro/pkg/cel"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -144,7 +144,7 @@ func TestGenerateSchemaFromCELTypes_Timestamp(t *testing.T) {
 	require.True(t, ok)
 
 	assert.Equal(t, "string", prop.Type)
-	assert.Equal(t, "datetime", prop.Format)
+	assert.Equal(t, "date-time", prop.Format)
 	assert.Equal(t, "Timestamp representing a creation time", prop.Description)
 }
 

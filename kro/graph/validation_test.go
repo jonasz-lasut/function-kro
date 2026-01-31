@@ -15,51 +15,63 @@
 package graph
 
 import (
+	"strings"
 	"testing"
 
-	"github.com/upbound/function-kro/input/v1beta1"
+	"github.com/google/cel-go/cel"
+
+	"github.com/kubernetes-sigs/kro/api/v1alpha1"
+	krocel "github.com/kubernetes-sigs/kro/pkg/cel"
 )
 
 func TestValidateRGResourceNames(t *testing.T) {
 	tests := []struct {
 		name        string
-		rg          *v1beta1.ResourceGraph
+		rgd         *v1alpha1.ResourceGraphDefinition
 		expectError bool
 	}{
 		{
 			name: "Valid resource graph definition resource ids",
-			rg: &v1beta1.ResourceGraph{
-				Resources: []*v1beta1.Resource{
-					{ID: "validID1"},
-					{ID: "validID2"},
+			rgd: &v1alpha1.ResourceGraphDefinition{
+				Spec: v1alpha1.ResourceGraphDefinitionSpec{
+					Resources: []*v1alpha1.Resource{
+						{ID: "validID1"},
+						{ID: "validID2"},
+					},
 				},
 			},
 			expectError: false,
 		},
 		{
 			name: "Duplicate resource ids",
-			rg: &v1beta1.ResourceGraph{
-				Resources: []*v1beta1.Resource{
-					{ID: "duplicateID"},
-					{ID: "duplicateID"},
+			rgd: &v1alpha1.ResourceGraphDefinition{
+				Spec: v1alpha1.ResourceGraphDefinitionSpec{
+					Resources: []*v1alpha1.Resource{
+						{ID: "duplicateID"},
+						{ID: "duplicateID"},
+					},
 				},
 			},
 			expectError: true,
 		},
 		{
 			name: "Invalid resource ID",
-			rg: &v1beta1.ResourceGraph{
-				Resources: []*v1beta1.Resource{
-					{ID: "Invalid_ID"},
+			rgd: &v1alpha1.ResourceGraphDefinition{
+				Spec: v1alpha1.ResourceGraphDefinitionSpec{
+					Resources: []*v1alpha1.Resource{
+						{ID: "Invalid_ID"},
+					},
 				},
 			},
 			expectError: true,
 		},
 		{
 			name: "Reserved word as resource id",
-			rg: &v1beta1.ResourceGraph{
-				Resources: []*v1beta1.Resource{
-					{ID: "spec"},
+			rgd: &v1alpha1.ResourceGraphDefinition{
+				Spec: v1alpha1.ResourceGraphDefinitionSpec{
+					Resources: []*v1alpha1.Resource{
+						{ID: "spec"},
+					},
 				},
 			},
 			expectError: true,
@@ -68,7 +80,7 @@ func TestValidateRGResourceNames(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateResourceIDs(tt.rg)
+			err := validateResourceIDs(tt.rgd)
 			if (err != nil) != tt.expectError {
 				t.Errorf("validateRGResourceIDs() error = %v, expectError %v", err, tt.expectError)
 			}
@@ -83,6 +95,7 @@ func TestIsKROReservedWord(t *testing.T) {
 	}{
 		{"resourcegraphdefinition", true},
 		{"instance", true},
+		{"each", true}, // Reserved for per-item readiness in collections
 		{"notReserved", false},
 		{"RESOURCEGRAPHDEFINITION", false}, // Case-sensitive check
 	}
@@ -239,6 +252,291 @@ func TestValidateKubernetesVersion(t *testing.T) {
 			}
 			if !tt.shouldPass && err == nil {
 				t.Errorf("Expected version %q to be invalid, but it passed validation", tt.version)
+			}
+		})
+	}
+}
+
+func TestValidateResourceGraphDefinitionNamingConventions(t *testing.T) {
+	tests := []struct {
+		name       string
+		resourceID string
+		kind       string
+		wantErr    bool
+	}{
+		{
+			name:       "Valid naming conventions",
+			resourceID: "validResourceID",
+			kind:       "ValidKindName",
+			wantErr:    false,
+		},
+		{
+			name:       "Invalid kind name",
+			resourceID: "validResourceID",
+			kind:       "invalidKindName",
+			wantErr:    true,
+		},
+		{
+			name:       "Invalid resource ID",
+			resourceID: "invalid_ResourceID",
+			kind:       "ValidKindName",
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rgd := &v1alpha1.ResourceGraphDefinition{
+				Spec: v1alpha1.ResourceGraphDefinitionSpec{
+					Resources: []*v1alpha1.Resource{
+						{ID: tt.resourceID},
+					},
+					Schema: &v1alpha1.Schema{
+						Kind: tt.kind,
+					},
+				},
+			}
+			if err := validateResourceGraphDefinitionNamingConventions(rgd); (err != nil) != tt.wantErr {
+				t.Errorf("validateResourceGraphDefinitionNamingConventions() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestInferListElementType(t *testing.T) {
+	tests := []struct {
+		name        string
+		celType     *cel.Type
+		wantElemTyp *cel.Type
+		wantErr     bool
+	}{
+		{
+			name:        "list of strings",
+			celType:     cel.ListType(cel.StringType),
+			wantElemTyp: cel.StringType,
+			wantErr:     false,
+		},
+		{
+			name:        "list of ints",
+			celType:     cel.ListType(cel.IntType),
+			wantElemTyp: cel.IntType,
+			wantErr:     false,
+		},
+		{
+			name:        "list of dyn",
+			celType:     cel.ListType(cel.DynType),
+			wantElemTyp: cel.DynType,
+			wantErr:     false,
+		},
+		{
+			name:    "not a list - string type",
+			celType: cel.StringType,
+			wantErr: true,
+		},
+		{
+			name:    "not a list - int type",
+			celType: cel.IntType,
+			wantErr: true,
+		},
+		{
+			name:    "not a list - map type",
+			celType: cel.MapType(cel.StringType, cel.IntType),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			elemType, err := krocel.ListElementType(tt.celType)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("ListElementType() expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("ListElementType() unexpected error: %v", err)
+				return
+			}
+			if !tt.wantElemTyp.IsAssignableType(elemType) {
+				t.Errorf("ListElementType() = %v, want %v", elemType, tt.wantElemTyp)
+			}
+		})
+	}
+}
+
+func TestValidateForEachDimensions(t *testing.T) {
+	tests := []struct {
+		name        string
+		rgd         *v1alpha1.ResourceGraphDefinition
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			name: "Valid forEach iterator",
+			rgd: &v1alpha1.ResourceGraphDefinition{
+				Spec: v1alpha1.ResourceGraphDefinitionSpec{
+					Resources: []*v1alpha1.Resource{
+						{
+							ID: "workers",
+							ForEach: []v1alpha1.ForEachDimension{
+								{"name": "${schema.spec.workers}"},
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "Valid multiple forEach iterators",
+			rgd: &v1alpha1.ResourceGraphDefinition{
+				Spec: v1alpha1.ResourceGraphDefinitionSpec{
+					Resources: []*v1alpha1.Resource{
+						{
+							ID: "deployments",
+							ForEach: []v1alpha1.ForEachDimension{
+								{"region": "${schema.spec.regions}"},
+								{"tier": "${schema.spec.tiers}"},
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "Invalid iterator name - not lowerCamelCase",
+			rgd: &v1alpha1.ResourceGraphDefinition{
+				Spec: v1alpha1.ResourceGraphDefinitionSpec{
+					Resources: []*v1alpha1.Resource{
+						{
+							ID: "workers",
+							ForEach: []v1alpha1.ForEachDimension{
+								{"Invalid_Name": "${schema.spec.workers}"},
+							},
+						},
+					},
+				},
+			},
+			expectError: true,
+			errorMsg:    "forEach iterator name",
+		},
+		{
+			name: "Iterator name is reserved keyword (schema)",
+			rgd: &v1alpha1.ResourceGraphDefinition{
+				Spec: v1alpha1.ResourceGraphDefinitionSpec{
+					Resources: []*v1alpha1.Resource{
+						{
+							ID: "workers",
+							ForEach: []v1alpha1.ForEachDimension{
+								{"schema": "${schema.spec.workers}"},
+							},
+						},
+					},
+				},
+			},
+			expectError: true,
+			errorMsg:    "reserved keyword",
+		},
+		{
+			name: "Iterator name 'each' is reserved for per-item readiness",
+			rgd: &v1alpha1.ResourceGraphDefinition{
+				Spec: v1alpha1.ResourceGraphDefinitionSpec{
+					Resources: []*v1alpha1.Resource{
+						{
+							ID: "pods",
+							ForEach: []v1alpha1.ForEachDimension{
+								{"each": "${schema.spec.podNames}"},
+							},
+						},
+					},
+				},
+			},
+			expectError: true,
+			errorMsg:    "reserved keyword",
+		},
+		{
+			name: "Iterator name conflicts with resource ID",
+			rgd: &v1alpha1.ResourceGraphDefinition{
+				Spec: v1alpha1.ResourceGraphDefinitionSpec{
+					Resources: []*v1alpha1.Resource{
+						{ID: "database"},
+						{
+							ID: "backups",
+							ForEach: []v1alpha1.ForEachDimension{
+								{"database": "${schema.spec.databases}"},
+							},
+						},
+					},
+				},
+			},
+			expectError: true,
+			errorMsg:    "conflicts with resource ID",
+		},
+		{
+			name: "Duplicate iterator names in same resource",
+			rgd: &v1alpha1.ResourceGraphDefinition{
+				Spec: v1alpha1.ResourceGraphDefinitionSpec{
+					Resources: []*v1alpha1.Resource{
+						{
+							ID: "workers",
+							ForEach: []v1alpha1.ForEachDimension{
+								{"name": "${schema.spec.workers}"},
+								{"name": "${schema.spec.otherWorkers}"},
+							},
+						},
+					},
+				},
+			},
+			expectError: true,
+			errorMsg:    "duplicate forEach iterator name",
+		},
+		{
+			name: "Same iterator name in different resources is valid",
+			rgd: &v1alpha1.ResourceGraphDefinition{
+				Spec: v1alpha1.ResourceGraphDefinitionSpec{
+					Resources: []*v1alpha1.Resource{
+						{
+							ID: "workers",
+							ForEach: []v1alpha1.ForEachDimension{
+								{"name": "${schema.spec.workers}"},
+							},
+						},
+						{
+							ID: "backups",
+							ForEach: []v1alpha1.ForEachDimension{
+								{"name": "${schema.spec.databases}"},
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "Resource without forEach is valid",
+			rgd: &v1alpha1.ResourceGraphDefinition{
+				Spec: v1alpha1.ResourceGraphDefinitionSpec{
+					Resources: []*v1alpha1.Resource{
+						{ID: "deployment"},
+					},
+				},
+			},
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateResourceIDs(tt.rgd)
+			if (err != nil) != tt.expectError {
+				t.Errorf("validateResourceIDs() error = %v, expectError %v", err, tt.expectError)
+			}
+			if tt.expectError && err != nil && tt.errorMsg != "" {
+				if !strings.Contains(err.Error(), tt.errorMsg) {
+					t.Errorf("validateResourceIDs() error = %v, should contain %q", err, tt.errorMsg)
+				}
 			}
 		})
 	}

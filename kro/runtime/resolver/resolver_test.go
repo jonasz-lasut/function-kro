@@ -21,7 +21,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/upbound/function-kro/kro/graph/variable"
+	"github.com/kubernetes-sigs/kro/pkg/graph/variable"
 )
 
 func TestGetValueFromPath(t *testing.T) {
@@ -662,6 +662,40 @@ func TestResolver(t *testing.T) {
 	assert.Equal(t, summary.TotalExpressions, 1)
 	assert.Equal(t, summary.ResolvedExpressions, 1)
 	assert.Equal(t, "resolved-done", summary.Results[0].Replaced)
+}
+
+func TestUpsertValueAtPath(t *testing.T) {
+	t.Run("creates nested structure", func(t *testing.T) {
+		resource := map[string]interface{}{}
+		r := NewResolver(resource, nil)
+
+		err := r.UpsertValueAtPath("status.conditions[0].type", "Ready")
+
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]interface{}{
+			"status": map[string]interface{}{
+				"conditions": []interface{}{
+					map[string]interface{}{
+						"type": "Ready",
+					},
+				},
+			},
+		}, resource)
+	})
+
+	t.Run("updates existing value", func(t *testing.T) {
+		resource := map[string]interface{}{
+			"status": map[string]interface{}{
+				"phase": "Pending",
+			},
+		}
+		r := NewResolver(resource, nil)
+
+		err := r.UpsertValueAtPath("status.phase", "Running")
+
+		assert.NoError(t, err)
+		assert.Equal(t, "Running", resource["status"].(map[string]interface{})["phase"])
+	})
 }
 
 // TestResolveFieldWithEmptyBraces tests the regression where strings.Trim() was

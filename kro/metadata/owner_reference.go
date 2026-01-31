@@ -18,11 +18,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/kubernetes-sigs/kro/api/v1alpha1"
 )
 
 var (
 	KRORGOwnerReferenceKind       = "ResourceGraphDefinition"
-	KRORGOwnerReferenceAPIVersion = schema.GroupVersion{Group: KRODomainName, Version: "v1alpha1"}.String()
+	KRORGOwnerReferenceAPIVersion = v1alpha1.GroupVersion.String()
 )
 
 // NewResourceGraphDefinitionOwnerReference stamped on the CRD and RGIs

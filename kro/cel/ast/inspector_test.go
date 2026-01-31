@@ -23,7 +23,7 @@ import (
 	"testing"
 
 	"github.com/google/cel-go/cel"
-	krocel "github.com/upbound/function-kro/kro/cel"
+	krocel "github.com/kubernetes-sigs/kro/pkg/cel"
 )
 
 func TestInspector_InspectionResults(t *testing.T) {
@@ -489,6 +489,29 @@ func TestInspector_InspectionResults(t *testing.T) {
 			wantFunctions: []FunctionCall{
 				{Name: "hash", Arguments: []string{"user.password"}},
 				{Name: "toLower", Arguments: []string{"user.name"}},
+			},
+		},
+		{
+			name:       "resource id collides with function namespace",
+			resources:  []string{"random"},
+			functions:  []string{"random.seededString"},
+			expression: `random.status.field == "x" && random.seededString(10, "abc") != ""`,
+			wantResources: []ResourceDependency{
+				{ID: "random", Path: "random.status.field"},
+			},
+			wantFunctions: []FunctionCall{
+				{Name: "random.seededString"},
+			},
+		},
+		{
+			name:       "duplicate resource references are NOT deduplicated",
+			resources:  []string{"deployment"},
+			expression: `deployment.spec.replicas + deployment.spec.replicas + deployment.status.replicas`,
+			wantResources: []ResourceDependency{
+				// Inspector reports each occurrence - no deduplication at this level
+				{ID: "deployment", Path: "deployment.spec.replicas"},
+				{ID: "deployment", Path: "deployment.spec.replicas"},
+				{ID: "deployment", Path: "deployment.status.replicas"},
 			},
 		},
 	}

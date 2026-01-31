@@ -19,7 +19,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/release-utils/version"
 )
 
 // mockObject is a simple implementation of metav1.Object for testing
@@ -239,12 +242,28 @@ func TestNewInstanceLabeler(t *testing.T) {
 		name := "instance-name"
 		namespace := "instance-namespace"
 		uid := types.UID("instance-uid")
-		obj := &mockObject{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, UID: uid}}
+		group := "apps.example.com"
+		version := "v1"
+		kind := "MyApp"
+
+		obj := &unstructured.Unstructured{}
+		obj.SetName(name)
+		obj.SetNamespace(namespace)
+		obj.SetUID(uid)
+		obj.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   group,
+			Version: version,
+			Kind:    kind,
+		})
+
 		labeler := NewInstanceLabeler(obj)
 		assert.Equal(t, GenericLabeler{
 			InstanceLabel:          name,
 			InstanceNamespaceLabel: namespace,
 			InstanceIDLabel:        string(uid),
+			InstanceGroupLabel:     group,
+			InstanceVersionLabel:   version,
+			InstanceKindLabel:      kind,
 		}, labeler)
 	})
 }
@@ -254,7 +273,7 @@ func TestNewKROMetaLabeler(t *testing.T) {
 		labeler := NewKROMetaLabeler()
 		assert.Equal(t, GenericLabeler{
 			OwnedLabel:        "true",
-			KROVersionLabel:   "function-kro",
+			KROVersionLabel:   version.GetVersionInfo().GitVersion,
 			ManagedByLabelKey: ManagedByKROValue,
 		}, labeler)
 	})

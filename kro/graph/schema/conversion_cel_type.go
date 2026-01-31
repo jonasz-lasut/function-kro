@@ -18,7 +18,7 @@ import (
 	"fmt"
 
 	"github.com/google/cel-go/cel"
-	krocel "github.com/upbound/function-kro/kro/cel"
+	krocel "github.com/kubernetes-sigs/kro/pkg/cel"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiservercel "k8s.io/apiserver/pkg/cel"
 	"k8s.io/utils/ptr"
@@ -156,7 +156,7 @@ func inferSchemaFromCELType(celType *cel.Type, provider *krocel.DeclTypeProvider
 		return &extv1.JSONSchemaProps{
 			Description: "Timestamp representing a creation time",
 			Type:        "string",
-			Format:      "datetime",
+			Format:      "date-time",
 		}, nil
 	default:
 		// Unknown type - be permissive

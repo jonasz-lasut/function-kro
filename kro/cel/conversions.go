@@ -18,10 +18,12 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
+	"github.com/google/cel-go/common/types/traits"
 )
 
 var (
@@ -42,10 +44,16 @@ func GoNativeType(v ref.Val) (interface{}, error) {
 		return v.Value().(float64), nil
 	case types.StringType:
 		return v.Value().(string), nil
+	case types.BytesType:
+		return v.Value().([]byte), nil
+	case types.DurationType:
+		return v.Value().(time.Duration), nil
+	case types.TimestampType:
+		return v.Value().(time.Time), nil
 	case types.ListType:
-		return v.ConvertToNative(reflect.TypeOf([]interface{}{}))
+		return convertList(v)
 	case types.MapType:
-		return v.ConvertToNative(reflect.TypeOf(map[string]interface{}{}))
+		return convertMap(v)
 	case types.OptionalType:
 		opt := v.(*types.Optional)
 		if !opt.HasValue() {
@@ -58,6 +66,53 @@ func GoNativeType(v ref.Val) (interface{}, error) {
 		// For types we can't convert, return as is with an error
 		return v.Value(), fmt.Errorf("%w: %v", ErrUnsupportedType, v.Type())
 	}
+}
+
+func convertList(v ref.Val) (interface{}, error) {
+	lister, ok := v.(traits.Lister)
+	if !ok {
+		return v.ConvertToNative(reflect.TypeOf([]interface{}{}))
+	}
+	var result []interface{}
+	it := lister.Iterator()
+	for it.HasNext() == types.True {
+		elem := it.Next()
+		native, err := GoNativeType(elem)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, native)
+	}
+	return result, nil
+}
+
+func convertMap(v ref.Val) (interface{}, error) {
+	mapper, ok := v.(traits.Mapper)
+	if !ok {
+		return v.ConvertToNative(reflect.TypeOf(map[string]interface{}{}))
+	}
+	result := make(map[string]interface{})
+	it := mapper.Iterator()
+	for it.HasNext() == types.True {
+		key := it.Next()
+		val := mapper.Get(key)
+
+		keyNative, err := GoNativeType(key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert map key: %w", err)
+		}
+		keyStr, ok := keyNative.(string)
+		if !ok {
+			return nil, fmt.Errorf("map key must be string, got %T", keyNative)
+		}
+
+		valNative, err := GoNativeType(val)
+		if err != nil {
+			return nil, err
+		}
+		result[keyStr] = valNative
+	}
+	return result, nil
 }
 
 // IsBoolType checks if the given ref.Val is of type BoolType

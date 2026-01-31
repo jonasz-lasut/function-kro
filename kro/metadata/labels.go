@@ -17,20 +17,29 @@ package metadata
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/validation"
+	"sigs.k8s.io/release-utils/version"
+
+	"github.com/kubernetes-sigs/kro/api/v1alpha1"
 )
 
 const (
-	// KRODomainName is the domain name for KRO resources
-	KRODomainName = "kro.run"
-
 	// LabelKROPrefix is the label key prefix used to identify KRO owned resources.
-	LabelKROPrefix = KRODomainName + "/"
+	LabelKROPrefix = v1alpha1.KRODomainName + "/"
 )
 
 const (
 	NodeIDLabel = LabelKROPrefix + "node-id"
+
+	// Collection labels for tracking collection membership and position.
+	// These enable querying collection resources and understanding their position.
+	CollectionIndexLabel = LabelKROPrefix + "collection-index"
+	CollectionSizeLabel  = LabelKROPrefix + "collection-size"
 
 	OwnedLabel      = LabelKROPrefix + "owned"
 	KROVersionLabel = LabelKROPrefix + "kro-version"
@@ -41,6 +50,9 @@ const (
 	InstanceIDLabel        = LabelKROPrefix + "instance-id"
 	InstanceLabel          = LabelKROPrefix + "instance-name"
 	InstanceNamespaceLabel = LabelKROPrefix + "instance-namespace"
+	InstanceGroupLabel     = LabelKROPrefix + "instance-group"
+	InstanceVersionLabel   = LabelKROPrefix + "instance-version"
+	InstanceKindLabel      = LabelKROPrefix + "instance-kind"
 
 	ResourceGraphDefinitionIDLabel        = LabelKROPrefix + "resource-graph-definition-id"
 	ResourceGraphDefinitionNameLabel      = LabelKROPrefix + "resource-graph-definition-name"
@@ -150,11 +162,17 @@ func NewResourceGraphDefinitionLabeler(rgMeta metav1.Object) GenericLabeler {
 // NewInstanceLabeler returns a new labeler that sets the InstanceLabel and
 // InstanceIDLabel labels on a resource. The InstanceLabel is the namespace
 // and name of the instance that was reconciled to create the resource.
-func NewInstanceLabeler(instanceMeta metav1.Object) GenericLabeler {
+// It also includes the instance's GVK to allow child
+// resource handlers to filter events by parent instance type.
+func NewInstanceLabeler(instance *unstructured.Unstructured) GenericLabeler {
+	gvk := instance.GroupVersionKind()
 	return map[string]string{
-		InstanceIDLabel:        string(instanceMeta.GetUID()),
-		InstanceLabel:          instanceMeta.GetName(),
-		InstanceNamespaceLabel: instanceMeta.GetNamespace(),
+		InstanceIDLabel:        string(instance.GetUID()),
+		InstanceLabel:          instance.GetName(),
+		InstanceNamespaceLabel: instance.GetNamespace(),
+		InstanceGroupLabel:     gvk.Group,
+		InstanceVersionLabel:   gvk.Version,
+		InstanceKindLabel:      gvk.Kind,
 	}
 }
 
@@ -163,9 +181,31 @@ func NewInstanceLabeler(instanceMeta metav1.Object) GenericLabeler {
 func NewKROMetaLabeler() GenericLabeler {
 	return map[string]string{
 		OwnedLabel:        "true",
-		KROVersionLabel:   "function-kro",
+		KROVersionLabel:   safeVersion(version.GetVersionInfo().GitVersion),
 		ManagedByLabelKey: ManagedByKROValue,
 	}
+}
+
+// NewCollectionItemLabeler returns a new labeler that sets collection-specific
+// labels on a resource that is part of a collection (forEach expansion).
+// - node-id: the resource ID from the RGD (e.g "workerPods")
+// - collection-index: the position in the collection (e.g "0", "1", "2")
+// - collection-size: the total number of items in the collection (e.g "3")
+func NewCollectionItemLabeler(nodeID string, index, size int) GenericLabeler {
+	return map[string]string{
+		NodeIDLabel:          nodeID,
+		CollectionIndexLabel: strconv.Itoa(index),
+		CollectionSizeLabel:  strconv.Itoa(size),
+	}
+}
+
+func safeVersion(version string) string {
+	if validation.IsValidLabelValue(version) == nil {
+		return version
+	}
+	// The script we use might add '+dirty' to development branches,
+	// so let's try replacing '+' with '-'.
+	return strings.ReplaceAll(version, "+", "-")
 }
 
 func booleanFromString(s string) bool {

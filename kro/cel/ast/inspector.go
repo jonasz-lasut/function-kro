@@ -107,10 +107,14 @@ type Inspector struct {
 }
 
 // knownFunctions contains the list of all CEL functions that are supported
+//
+// we need a better way to manage this list going forward... perhaps a Check
+// call is better suited than maintaining a hardcoded list.
 var knownFunctions = []string{
 	"random.seededString",
 	"base64.decode",
 	"base64.encode",
+	"lists.range",
 }
 
 // NewInspectorWithEnv creates a new Inspector with the given CEL environment and resource names.
@@ -262,10 +266,11 @@ func (a *Inspector) inspectCall(ast *celast.AST, call celast.CallExpr, path stri
 			targetName := a.exprToString(ast, t)
 			full := fmt.Sprintf("%s.%s", targetName, fn)
 
-			// Still inspect target for resource usage
-			out.merge(a.inspectExpr(ast, t, path))
-
-			// Treat chained method call as unknown unless known
+			// Inspect when its not a known namespaced function
+			if _, ok := a.functions[full]; !ok {
+				out.merge(a.inspectExpr(ast, t, path))
+			}
+			// Treat chained method calls as unknown unless they resolve to a known namespaced function
 			out.FunctionCalls = append(out.FunctionCalls, FunctionCall{
 				Name: full,
 			})
