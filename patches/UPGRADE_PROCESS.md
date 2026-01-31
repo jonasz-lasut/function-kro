@@ -1,0 +1,522 @@
+# Function-KRO Upstream Upgrade Process
+
+This document describes the process for upgrading function-kro to a new upstream KRO version. The process is designed to be repeatable and can be executed by humans or AI agents.
+
+## Overview
+
+Function-KRO vendors code from upstream [kubernetes-sigs/kro](https://github.com/kubernetes-sigs/kro) with adaptations for running as a Crossplane composition function. When upstream KRO releases a new version, we need to:
+
+1. Understand what changed upstream
+2. Copy the new code
+3. Re-apply our adaptations
+4. Validate everything works
+
+## Commit Strategy
+
+**Make incremental commits after each major step.** This provides:
+- Clear diffs showing exactly what changed at each phase
+- Recovery points if something goes wrong
+- Easier debugging when tests fail
+- Ability to pause and resume the upgrade
+
+The commits can be squashed into a single commit before merging if desired, but keeping them separate during development is essential for tracking progress and debugging.
+
+**Commit points in this process:**
+1. After copying upstream files (raw upstream code)
+2. After fixing import paths (mechanical transformation)
+3. After restoring our additions (preserve our custom files)
+4. After applying adaptations (our modifications to upstream code)
+5. After documenting changes (patches documentation)
+6. Final commit with any remaining cleanup
+
+## Directory Structure
+
+```
+patches/
+├── UPGRADE_PROCESS.md           # This document
+├── v{OLD}_PATCHES.md            # Adaptations we made for the previous version
+├── v{OLD}_to_v{NEW}_CHANGES.md  # Analysis of upstream changes (AI-generated)
+└── v{NEW}_PATCHES.md            # Adaptations for the new version (created during upgrade)
+```
+
+**Example for v0.7.1 → v0.8.0:**
+```
+patches/
+├── UPGRADE_PROCESS.md
+├── v0.7.1_PATCHES.md            # What we changed for v0.7.1
+├── v0.8.x_UPSTREAM_CHANGES.md   # What upstream changed in v0.8.x
+└── v0.8.x_PATCHES.md            # What we changed for v0.8.x (created during upgrade)
+```
+
+---
+
+## Phase 1: Pre-Analysis
+
+**Goal:** Understand what changed upstream before touching any code.
+
+### Step 1.1: Review Release Notes
+
+Read the upstream release notes to understand the high-level changes:
+```
+https://github.com/kubernetes-sigs/kro/releases/tag/v{NEW}
+```
+
+Look for:
+- New features (may require new adaptations)
+- Breaking changes (will definitely require attention)
+- Bug fixes (usually come free)
+- Dependency updates (may affect go.mod)
+
+### Step 1.2: Clone Both Versions
+
+```bash
+# Clone the old version we're currently based on
+git clone --depth 1 --branch v{OLD} \
+    https://github.com/kubernetes-sigs/kro.git /tmp/kro-old
+
+# Clone the new version we're upgrading to
+git clone --depth 1 --branch v{NEW} \
+    https://github.com/kubernetes-sigs/kro.git /tmp/kro-new
+```
+
+### Step 1.3: Generate Upstream Changes Analysis
+
+Have an AI agent (or manually) analyze the differences and create `v{OLD}_to_v{NEW}_CHANGES.md`:
+
+```bash
+# Compare the relevant directories
+diff -r /tmp/kro-old/pkg/graph /tmp/kro-new/pkg/graph
+diff -r /tmp/kro-old/pkg/cel /tmp/kro-new/pkg/cel
+diff -r /tmp/kro-old/pkg/runtime /tmp/kro-new/pkg/runtime
+diff -r /tmp/kro-old/pkg/metadata /tmp/kro-new/pkg/metadata
+```
+
+**The analysis document should include:**
+
+1. **Executive Summary** - High-level impact assessment
+2. **New Features** - What was added and whether function-kro needs it
+3. **API Changes** - Constructor signatures, method signatures, type changes
+4. **File Changes** - Which files were added/modified/deleted
+5. **Dependency Changes** - go.mod differences
+6. **Action Items** - Specific things that need adaptation
+
+**AI Agent Prompt for Analysis:**
+```
+Review the upstream KRO changes between v{OLD} and v{NEW}.
+
+Context:
+- Release notes: https://github.com/kubernetes-sigs/kro/releases/tag/v{NEW}
+- Comparison: https://github.com/kubernetes-sigs/kro/compare/v{OLD}...v{NEW}
+
+Generate a document covering:
+1. Summary of changes with impact assessment for function-kro
+2. New types/functions introduced in pkg/graph/, pkg/cel/, pkg/runtime/
+3. Changed function signatures (especially constructors)
+4. Removed types/functions
+5. Dependency version changes
+
+Focus on changes that affect:
+- graph.Builder and NewResourceGraphDefinition
+- Runtime creation and resource rendering
+- CEL environment and expression evaluation
+- Schema resolution interfaces
+```
+
+---
+
+## Phase 2: Copy New Files
+
+**Goal:** Replace vendored KRO code with the new version.
+
+### Step 2.1: Remove Old Files
+
+```bash
+# Remove existing vendored code (but preserve our additions)
+rm -rf kro/graph/dag/
+rm -rf kro/graph/parser/
+rm -rf kro/graph/fieldpath/
+rm -rf kro/graph/crd/
+rm -rf kro/graph/variable/
+rm -rf kro/cel/
+rm -rf kro/runtime/
+rm -rf kro/metadata/
+
+# Keep these files (our additions):
+# - kro/graph/schema/resolver/schema_map_resolver.go
+# - kro/graph/schema/resolver/crd_resolver.go
+# - kro/graph/schema/resolver/resolver.go (will need merge)
+# - kro/graph/schema/schema.go (will need merge)
+```
+
+### Step 2.2: Copy New Files
+
+```bash
+# Copy from upstream
+cp -r /tmp/kro-new/pkg/graph/* kro/graph/
+cp -r /tmp/kro-new/pkg/cel/* kro/cel/
+cp -r /tmp/kro-new/pkg/runtime/* kro/runtime/
+cp -r /tmp/kro-new/pkg/metadata/* kro/metadata/
+```
+
+**COMMIT CHECKPOINT 1: Raw upstream code**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+chore(upgrade): copy upstream KRO v{NEW} files
+
+Raw copy of upstream KRO v{NEW} packages before any modifications.
+Import paths still reference upstream github.com/kubernetes-sigs/kro/pkg/.
+
+This commit captures the unmodified upstream state for diff comparison.
+EOF
+)"
+```
+
+This commit establishes a clean baseline of upstream code. All subsequent
+commits will show exactly what we modified.
+
+### Step 2.3: Fix Import Paths
+
+Upstream uses `github.com/kubernetes-sigs/kro/pkg/...` but we use `github.com/upbound/function-kro/kro/...`:
+
+```bash
+# Update import paths in copied files
+find kro/ -name "*.go" -exec sed -i '' \
+    's|github.com/kubernetes-sigs/kro/pkg/|github.com/upbound/function-kro/kro/|g' {} \;
+
+# Also update any api/ imports if present
+find kro/ -name "*.go" -exec sed -i '' \
+    's|github.com/kubernetes-sigs/kro/api/|github.com/upbound/function-kro/input/|g' {} \;
+```
+
+**COMMIT CHECKPOINT 2: Import paths fixed**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+chore(upgrade): fix import paths for function-kro
+
+Mechanical transformation of import paths:
+- github.com/kubernetes-sigs/kro/pkg/ → github.com/upbound/function-kro/kro/
+- github.com/kubernetes-sigs/kro/api/ → github.com/upbound/function-kro/input/
+
+No functional changes, just import path updates.
+EOF
+)"
+```
+
+This commit isolates the import path changes, making it easy to verify
+only the expected substitutions were made.
+
+### Step 2.4: Restore Our Additions
+
+If our addition files were overwritten, restore them from git or re-create:
+
+```bash
+git checkout -- kro/graph/schema/resolver/schema_map_resolver.go
+git checkout -- kro/graph/schema/resolver/crd_resolver.go
+# Note: resolver.go and schema.go may need manual merge
+```
+
+**COMMIT CHECKPOINT 3: Our additions restored**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+chore(upgrade): restore function-kro custom files
+
+Restored files that are unique to function-kro (not from upstream):
+- kro/graph/schema/resolver/schema_map_resolver.go
+- kro/graph/schema/resolver/crd_resolver.go
+
+These files provide Crossplane-specific schema resolution.
+EOF
+)"
+```
+
+This commit restores our custom files that may have been overwritten
+during the copy operation. The codebase likely won't compile yet.
+
+---
+
+## Phase 3: Re-Apply Adaptations
+
+**Goal:** Make the new upstream code work with Crossplane's function model.
+
+### Step 3.1: Identify Compilation Errors
+
+```bash
+go build ./...
+```
+
+This will show what broke. Common issues:
+- Constructor signature mismatches
+- Missing/renamed types
+- Changed method signatures
+
+### Step 3.2: Apply Adaptations
+
+Using the previous `v{OLD}_PATCHES.md` as a guide, re-apply each adaptation:
+
+**AI Agent Prompt for Adaptations:**
+```
+I'm upgrading function-kro from KRO v{OLD} to v{NEW}.
+
+Context files:
+1. patches/v{OLD}_PATCHES.md - Our previous adaptations and their intent
+2. patches/v{OLD}_to_v{NEW}_CHANGES.md - What changed upstream
+3. fn.go - Our Crossplane function entry point
+4. Current compilation errors from `go build`
+
+Tasks:
+1. Re-apply the adaptations from v{OLD}_PATCHES.md to the new code
+2. For each adaptation, check if the upstream API changed and adapt accordingly
+3. If upstream added new features (like forEach), integrate them
+4. Do NOT blindly copy old code - understand the intent and apply appropriately
+
+Key adaptations to re-apply:
+- Builder constructor: Accept (resolver, restMapper) instead of (clientConfig, httpClient)
+- NewResourceGraphDefinition: Accept (ResourceGraph, *spec.Schema) instead of full RGD CR
+- REST mapping fallback when restMapper is nil
+- ObjectMeta schema injection in schema resolution paths
+- Schema resolution via SchemaMapResolver and CRDSchemaResolver
+
+After fixing compilation, run tests and fix any failures.
+```
+
+**COMMIT CHECKPOINT 4: Adaptations applied**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+chore(upgrade): apply function-kro adaptations to v{NEW}
+
+Re-applied adaptations for Crossplane function compatibility:
+- Modified Builder constructor to accept resolver instead of clientConfig
+- Updated NewResourceGraphDefinition to accept schema parameter
+- Added REST mapping fallback for nil restMapper
+- Injected ObjectMeta schema in resolution paths
+- [Add any new adaptations specific to this version]
+
+Build passes: yes
+Tests pass: yes
+EOF
+)"
+```
+
+This is the most important commit - it shows exactly what we changed
+from upstream to make it work as a Crossplane function. The diff from
+the previous commit reveals all our adaptations clearly.
+
+### Step 3.3: Handle New Features
+
+If upstream added features that function-kro should support (e.g., Collections/forEach):
+
+1. **Update input types** (`input/v1beta1/input.go`) with new fields
+2. **Update fn.go** to handle new runtime behaviors
+3. **Add tests** for new functionality
+
+### Step 3.4: Document New Adaptations
+
+Create `v{NEW}_PATCHES.md` documenting:
+- All adaptations (carried forward + new)
+- Any changes to the adaptation approach
+- New features and how they're integrated
+
+**COMMIT CHECKPOINT 5: Documentation updated**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+docs(upgrade): document v{NEW} patches and changes
+
+Added/updated patch documentation:
+- patches/v{NEW}_PATCHES.md - All adaptations for this version
+- [Any other documentation changes]
+
+This documents what we changed and why for future upgrades.
+EOF
+)"
+```
+
+Documenting the patches in a separate commit keeps the code changes
+clean and makes it clear what was modified vs documented.
+
+---
+
+## Phase 4: Validation
+
+**Goal:** Ensure everything works correctly.
+
+### Step 4.1: Build
+
+```bash
+go build ./...
+```
+
+Must complete with no errors.
+
+### Step 4.2: Run Tests
+
+```bash
+go test -v ./...
+```
+
+Fix any test failures. Some may be due to:
+- Changed test utilities in upstream
+- New validation that catches previously-ignored issues
+- Changed behavior that tests need to account for
+
+### Step 4.3: Lint
+
+```bash
+golangci-lint run
+```
+
+Fix any lint issues.
+
+### Step 4.4: Manual Testing
+
+Let the human handle manual testing and validation for now until we have more automation in place for this.
+
+---
+
+## Phase 5: Finalize
+
+### Step 5.1: Update Documentation
+
+- [ ] Update `patches/v{NEW}_PATCHES.md` with final adaptations
+- [ ] Archive or update `patches/v{OLD}_to_v{NEW}_CHANGES.md`
+- [ ] Update `AGENTS.md` if architecture changed significantly
+- [ ] Update `README.md` with new KRO version
+
+### Step 5.2: Update Dependencies
+
+Check if go.mod needs updates based on upstream:
+
+```bash
+# Compare go.mod files
+diff /tmp/kro-new/go.mod go.mod
+
+# Update dependencies as needed
+go get <package>@<version>
+go mod tidy
+```
+
+### Step 5.3: Final Cleanup Commit (if needed)
+
+If there are any remaining changes after validation (dependency updates,
+lint fixes, etc.), commit them:
+
+**COMMIT CHECKPOINT 6: Final cleanup**
+
+```bash
+git add -A
+git commit -m "$(cat <<'EOF'
+chore(upgrade): final cleanup for KRO v{NEW} upgrade
+
+- Updated go.mod dependencies to match upstream
+- Fixed lint issues
+- [Any other cleanup items]
+EOF
+)"
+```
+
+### Step 5.4: Squash for PR (Optional)
+
+If you prefer a clean single-commit history for the PR, you can squash
+all upgrade commits:
+
+```bash
+# Count how many commits in the upgrade (adjust N as needed)
+git rebase -i HEAD~6
+
+# Or create a squashed commit message:
+git reset --soft HEAD~6
+git commit -m "$(cat <<'EOF'
+chore(deps): bump KRO packages to v{NEW}
+
+Upgraded vendored KRO code from v{OLD} to v{NEW}.
+
+Changes:
+- Copied upstream KRO v{NEW} packages
+- Re-applied function-kro adaptations
+- [List any new features integrated]
+- [List any notable changes]
+
+See patches/v{NEW}_PATCHES.md for detailed adaptation documentation.
+EOF
+)"
+```
+
+**Note:** Keeping commits separate during review can help reviewers understand
+the upgrade process. Squashing is optional and depends on team preference.
+
+---
+
+## Quick Reference
+
+### Files We Add (not in upstream)
+
+| File | Purpose |
+|------|---------|
+| `kro/graph/schema/resolver/schema_map_resolver.go` | Resolve schemas from Crossplane's required_schemas |
+| `kro/graph/schema/resolver/crd_resolver.go` | Resolve schemas from CRDs (fallback path) |
+
+### Files We Modify
+
+| File | Adaptation |
+|------|------------|
+| `kro/graph/builder.go` | Constructor accepts resolver; NewResourceGraphDefinition accepts schema |
+| `kro/graph/schema/resolver/resolver.go` | Combined resolver constructors |
+| `kro/graph/schema/schema.go` | ObjectMetaSchema, DeepCopySchema |
+
+### Files We Don't Copy
+
+| Upstream Path | Reason |
+|---------------|--------|
+| `pkg/controller/` | Controller logic not needed |
+| `pkg/simpleschema/` | SimpleSchema not used (Crossplane provides schemas) |
+| `pkg/dynamiccontroller/` | Dynamic controller not needed |
+| `api/` | We have our own input types |
+
+---
+
+## Troubleshooting
+
+### "undefined: SomeType" errors
+
+The type may have been renamed or moved. Check the upstream changes analysis for renames.
+
+### "cannot use X as Y" errors
+
+A type's definition changed. Look at the new definition and update callers.
+
+### Tests fail with "unexpected call"
+
+Mock interfaces may have changed. Update test mocks to match new interfaces.
+
+### Runtime panics
+
+Often caused by nil pointer issues when upstream added new required fields. Check struct initialization.
+
+---
+
+## Commit Checkpoint Summary
+
+| Checkpoint | After Step | Purpose |
+|------------|------------|---------|
+| 1 | 2.2 | Raw upstream code - establishes baseline |
+| 2 | 2.3 | Import paths fixed - mechanical change only |
+| 3 | 2.4 | Our additions restored - custom files back |
+| 4 | 3.2 | Adaptations applied - **most important diff** |
+| 5 | 3.4 | Documentation updated - patches documented |
+| 6 | 5.3 | Final cleanup - deps, lint, etc. |
+
+**Why these checkpoints matter:**
+- Checkpoint 4 (adaptations) is the key diff - it shows exactly what we
+  changed from upstream to make it work with Crossplane
+- If tests fail after adaptations, compare against checkpoint 3 to see
+  exactly what broke
+- Checkpoints 1-3 are mechanical and should be reviewable at a glance
