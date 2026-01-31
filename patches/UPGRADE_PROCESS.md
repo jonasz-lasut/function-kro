@@ -282,7 +282,12 @@ Key adaptations to re-apply:
 - ObjectMeta schema injection in schema resolution paths
 - Schema resolution via SchemaMapResolver and CRDSchemaResolver
 
-After fixing compilation, run tests and fix any failures.
+After fixing compilation, also do the following
+
+- run code generation to update generated methods and CRD schemas:
+go generate ./...
+
+- run tests and fix any failures
 ```
 
 **COMMIT CHECKPOINT 4: Adaptations applied**
