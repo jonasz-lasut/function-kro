@@ -18,12 +18,13 @@ import (
 	"net/http"
 	"time"
 
-	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apiextensions-apiserver/pkg/generated/openapi"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/cel/openapi/resolver"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/kube-openapi/pkg/validation/spec"
 )
 
 // NewCombinedResolver creates a new schema resolver that can resolve both core and client types.
@@ -66,27 +67,23 @@ func NewCombinedResolver(clientConfig *rest.Config, httpClient *http.Client) (re
 func NewCombinedResolverFromSchemas(schemaMapResolver *SchemaMapResolver) resolver.SchemaResolver {
 	coreResolver := newCoreResolver()
 	// Combine: schema map first (Crossplane-provided), then core (built-in types).
-	return schemaMapResolver.Combine(coreResolver)
+	return &combinedResolver{
+		primary:  schemaMapResolver,
+		fallback: coreResolver,
+	}
 }
 
 // NewCombinedResolverFromCRDs creates a schema resolver that combines
 // a CRD schema resolver (for schemas extracted from CRDs) with a core resolver
 // (for built-in Kubernetes types). This is the constructor for use with
-// Crossplane functions that receive CRDs via extra_resources.
-func NewCombinedResolverFromCRDs(crds []*extv1.CustomResourceDefinition) (resolver.SchemaResolver, error) {
-	crdResolver, err := NewCRDSchemaResolver(crds)
-	if err != nil {
-		return nil, err
-	}
-
+// Crossplane functions that receive CRDs via required_resources.
+func NewCombinedResolverFromCRDs(crdResolver *CRDSchemaResolver) resolver.SchemaResolver {
 	coreResolver := newCoreResolver()
-
 	// Combine: CRD resolver first, then core (built-in types).
-	// We wrap the CRD resolver to implement the Combine pattern.
 	return &combinedResolver{
 		primary:  crdResolver,
 		fallback: coreResolver,
-	}, nil
+	}
 }
 
 // newCoreResolver creates a resolver for built-in Kubernetes types using
@@ -97,4 +94,26 @@ func newCoreResolver() resolver.SchemaResolver {
 		openapi.GetOpenAPIDefinitions,
 		scheme.Scheme,
 	)
+}
+
+// combinedResolver tries resolvers in order until one returns a schema.
+// We need our own rather than using DefinitionsSchemaResolver.Combine() because
+// that method puts core types as primary. We need the opposite priority:
+// Crossplane-provided schemas first, core types as fallback.
+type combinedResolver struct {
+	primary  resolver.SchemaResolver
+	fallback resolver.SchemaResolver
+}
+
+func (c *combinedResolver) ResolveSchema(gvk schema.GroupVersionKind) (*spec.Schema, error) {
+	// Try primary resolver first
+	s, err := c.primary.ResolveSchema(gvk)
+	if err != nil {
+		return nil, err
+	}
+	if s != nil {
+		return s, nil
+	}
+	// Fall back to secondary resolver
+	return c.fallback.ResolveSchema(gvk)
 }

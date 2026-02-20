@@ -18,7 +18,6 @@ import (
 	"sync"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apiserver/pkg/cel/openapi/resolver"
 	"k8s.io/kube-openapi/pkg/validation/spec"
 )
 
@@ -41,33 +40,4 @@ func (r *SchemaMapResolver) ResolveSchema(gvk schema.GroupVersionKind) (*spec.Sc
 	r.mx.RLock()
 	defer r.mx.RUnlock()
 	return r.schemas[gvk], nil
-}
-
-// Combine returns a new SchemaResolver that first tries this resolver,
-// then falls back to the provided resolver if not found.
-func (r *SchemaMapResolver) Combine(fallback resolver.SchemaResolver) resolver.SchemaResolver {
-	return &combinedResolver{
-		primary:  r,
-		fallback: fallback,
-	}
-}
-
-// combinedResolver tries resolvers in order until one returns a schema.
-type combinedResolver struct {
-	primary  resolver.SchemaResolver
-	fallback resolver.SchemaResolver
-}
-
-func (c *combinedResolver) ResolveSchema(gvk schema.GroupVersionKind) (*spec.Schema, error) {
-	// Try primary resolver first
-	s, err := c.primary.ResolveSchema(gvk)
-	if err != nil {
-		return nil, err
-	}
-	if s != nil {
-		return s, nil
-	}
-
-	// Fall back to secondary resolver
-	return c.fallback.ResolveSchema(gvk)
 }

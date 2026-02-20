@@ -86,11 +86,3 @@ func (r *CRDSchemaResolver) ResolveSchema(gvk schema.GroupVersionKind) (*spec.Sc
 	defer r.mx.RUnlock()
 	return r.schemas[gvk], nil
 }
-
-// GetSchemaForGVK returns the schema for a specific GVK, or nil if not found.
-// This is a convenience method for callers who need direct access to a schema.
-func (r *CRDSchemaResolver) GetSchemaForGVK(gvk schema.GroupVersionKind) *spec.Schema {
-	r.mx.RLock()
-	defer r.mx.RUnlock()
-	return r.schemas[gvk]
-}
