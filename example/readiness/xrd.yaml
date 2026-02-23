@@ -1,0 +1,35 @@
+apiVersion: apiextensions.crossplane.io/v2
+kind: CompositeResourceDefinition
+metadata:
+  name: networkingstacks.readiness.example.crossplane.io
+spec:
+  group: readiness.example.crossplane.io
+  names:
+    kind: NetworkingStack
+    plural: networkingstacks
+  scope: Namespaced
+  versions:
+  - name: v1
+    served: true
+    referenceable: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              region:
+                type: string
+          status:
+            type: object
+            properties:
+              networkingInfo:
+                type: object
+                properties:
+                  vpcID:
+                    type: string
+                  subnetID:
+                    type: string
+                  securityGroupID:
+                    type: string

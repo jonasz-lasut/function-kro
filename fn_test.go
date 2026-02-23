@@ -240,7 +240,6 @@ func TestRunFunction(t *testing.T) {
 										}
 									}
 								}`),
-								Ready: fnv1.Ready_READY_FALSE,
 							},
 						},
 					},
@@ -418,7 +417,7 @@ func TestRunFunction(t *testing.T) {
 										}
 									}
 								}`),
-								Ready: fnv1.Ready_READY_TRUE, // Ready because observed resource exists with status
+								// No readyWhen defined, so Ready is left unspecified for function-auto-ready to handle
 							},
 						},
 					},
@@ -613,7 +612,6 @@ func TestRunFunction(t *testing.T) {
 										}
 									}
 								}`),
-								Ready: fnv1.Ready_READY_FALSE,
 							},
 						},
 					},
@@ -817,7 +815,6 @@ func TestRunFunction(t *testing.T) {
 										}
 									}
 								}`),
-								Ready: fnv1.Ready_READY_FALSE,
 							},
 						},
 					},

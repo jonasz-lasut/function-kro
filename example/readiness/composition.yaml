@@ -1,0 +1,66 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: networkingstack-readiness
+spec:
+  compositeTypeRef:
+    apiVersion: readiness.example.crossplane.io/v1
+    kind: NetworkingStack
+  mode: Pipeline
+  pipeline:
+  - step: kro-run
+    functionRef:
+      name: function-kro
+    input:
+      apiVersion: kro.fn.crossplane.io/v1beta1
+      kind: ResourceGraph
+      status:
+        networkingInfo:
+          vpcID: ${vpc.status.atProvider.id}
+          subnetID: ${subnet.status.atProvider.id}
+          securityGroupID: ${securityGroup.status.atProvider.id}
+      resources:
+      # VPC is ready once its ID is populated in status.
+      # The ?. operator with hasValue() safely checks fields that may not exist yet.
+      - id: vpc
+        readyWhen:
+          - ${vpc.status.?atProvider.?id.hasValue()}
+        template:
+          apiVersion: ec2.aws.m.upbound.io/v1beta1
+          kind: VPC
+          metadata: {}
+          spec:
+            forProvider:
+              region: ${schema.spec.region}
+              cidrBlock: 192.168.0.0/16
+              enableDnsHostnames: false
+              enableDnsSupport: true
+      # Subnet is ready once its ID is populated in status.
+      - id: subnet
+        readyWhen:
+          - ${subnet.status.?atProvider.?id.hasValue()}
+        template:
+          apiVersion: ec2.aws.m.upbound.io/v1beta1
+          kind: Subnet
+          metadata: {}
+          spec:
+            forProvider:
+              region: ${schema.spec.region}
+              availabilityZone: ${schema.spec.region + "a"}
+              cidrBlock: 192.168.0.0/18
+              vpcId: ${vpc.status.atProvider.id}
+      # Security group is ready when it has a Ready=True condition.
+      # This uses ?. with orValue([]) to safely access conditions, then .exists() to check the array.
+      - id: securityGroup
+        readyWhen:
+          - ${securityGroup.status.?conditions.orValue([]).exists(c, c.type == "Ready" && c.status == "True")}
+        template:
+          apiVersion: ec2.aws.m.upbound.io/v1beta1
+          kind: SecurityGroup
+          metadata: {}
+          spec:
+            forProvider:
+              name: my-sg-${schema.metadata.name}
+              region: ${schema.spec.region}
+              description: ${"Security group for " + schema.metadata.name}
+              vpcId: ${vpc.status.atProvider.id}

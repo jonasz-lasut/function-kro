@@ -199,24 +199,8 @@ func (f *Function) RunFunction(_ context.Context, req *fnv1.RunFunctionRequest) 
 
 	// Set observed state on each node so the KRO runtime has access to all its
 	// observed fields/values to use when evaluating expressions.
-	ready := make(map[string]bool)
 	for id, observed := range observedByNodeID {
-		node := nodesByID[id]
-		node.SetObserved(observed)
-
-		// check if the node is now ready and store that so we can set it on the
-		// desired composed resource later
-		isReady, err := node.IsReady()
-		if err != nil {
-			f.log.Info("Error checking resource readiness", "id", id, "err", err)
-			continue
-		}
-		if !isReady {
-			f.log.Debug("Resource isn't ready yet", "id", id)
-			continue
-		}
-
-		ready[id] = true
+		nodesByID[id].SetObserved(observed)
 	}
 
 	dcds, err := request.GetDesiredComposedResources(req)
@@ -270,16 +254,29 @@ func (f *Function) RunFunction(_ context.Context, req *fnv1.RunFunctionRequest) 
 				resourceName = id + "-" + strconv.Itoa(i)
 			}
 
-			// add the resource to the desired composed resources and set its ready state
 			cd, err := composed.From(r)
 			if err != nil {
 				response.Fatal(rsp, errors.Wrapf(err, "cannot create composed resource from template id %s", id))
 				return rsp, nil
 			}
-			dcds[resource.Name(resourceName)] = &resource.DesiredComposed{Resource: cd, Ready: resource.ReadyFalse}
-			if ready[id] {
-				dcds[resource.Name(resourceName)].Ready = resource.ReadyTrue
+
+			// add the resource to the desired composed resources and set its
+			// ready state. If readyWhen expressions are defined, we explicitly
+			// set ReadyTrue/ReadyFalse based on their evaluation. If no
+			// readyWhen is defined, we leave readiness as ReadyUnspecified so
+			// that later functions in the pipeline (like function-auto-ready)
+			// can determine readiness using their own logic.
+			readyState := resource.ReadyUnspecified
+			if len(node.Spec.ReadyWhen) > 0 {
+				readyState = resource.ReadyFalse
+				if isReady, err := node.IsReady(); err != nil {
+					f.log.Info("Error checking resource readiness", "id", id, "err", err)
+				} else if isReady {
+					readyState = resource.ReadyTrue
+				}
 			}
+			f.log.Debug("Resource ready state", "id", id, "ready", readyState)
+			dcds[resource.Name(resourceName)] = &resource.DesiredComposed{Resource: cd, Ready: readyState}
 		}
 	}
 
