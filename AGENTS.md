@@ -48,7 +48,7 @@ Crossplane RunFunctionRequest
 │     - Check IsIgnored (includeWhen + contagious dependency skip) │
 │     - Evaluate GetDesired (hard resolve for resources/collections│
 │       soft resolve for instance)                                 │
-│     - Handle collections (forEach → {id}-0, {id}-1, ...)        │
+│     - Handle collections (forEach → {id}-{name}, ...)            │
 │     - Evaluate readiness (ReadyTrue/False or ReadyUnspecified)   │
 │  8. Build XR status from instance node's soft-resolved fields    │
 └──────────────────────────────────────────────────────────────────┘
@@ -117,7 +117,7 @@ function-kro/
 │   └── UPGRADE_PROCESS.md   # Process for upgrading from upstream KRO
 ├── package/                 # Crossplane package definition
 ├── example/                 # Usage examples (basic, collections, conditionals, externalref, readiness)
-├── scripts/                 # Build scripts (build-local.sh)
+├── scripts/                 # Build scripts (build-local.sh, diff-upstream-kro.sh)
 └── Dockerfile               # Production build
 ```
 
@@ -150,7 +150,7 @@ type ForEachDimension map[string]string  // iterator variable name → CEL list 
 The graph builder categorizes each resource into a NodeType that determines runtime behavior:
 
 - **NodeTypeResource**: Standard managed resource. Hard resolution (fails if any CEL expression can't resolve).
-- **NodeTypeCollection**: forEach-expanded resource. Hard resolution per expansion item. Named `{id}-{index}` in composed output.
+- **NodeTypeCollection**: forEach-expanded resource. Hard resolution per expansion item. Named `{id}-{metadata.name}` in composed output (e.g., `subnets-my-app-us-east-1`).
 - **NodeTypeExternal**: ExternalRef read-only resource. Identity-only resolution (name/namespace). Excluded from desired output.
 - **NodeTypeInstance**: The XR itself. Soft resolution (best-effort partial status — skips unresolvable fields).
 
@@ -277,7 +277,7 @@ The DAG package (`kro/graph/dag/`) handles topological sorting:
 Resources with `forEach` expand into multiple composed resources at runtime:
 - Builder sets `NodeTypeCollection` on the graph node (`kro/graph/builder.go`)
 - Runtime evaluates forEach dimensions as CEL list expressions, then expands via cartesian product for multi-dimensional cases (`kro/runtime/node.go:hardResolveCollection`)
-- Each expanded resource gets a `kro.run/collection-index` label and is named `{id}-{index}` in composed resources
+- Each expanded resource gets a `kro.run/collection-index` label and is named `{id}-{metadata.name}` in composed resources (e.g., `subnets-my-app-us-east-1`)
 - Collection `readyWhen` uses the `each` variable to evaluate per-item readiness
 - Observed composed resources are matched back to collection nodes by checking the `kro.run/collection-index` label and stripping the `-N` suffix
 
@@ -323,6 +323,53 @@ The runtime deduplicates CEL expression evaluation via a shared `expressionsCach
 - `patches/UPGRADE_PROCESS.md` — Process for upgrading from upstream KRO releases
 - `spec-desired-ssa.md` — Original SSA design spec (references older API names; implementation evolved)
 - `example/README.md` — Working examples for all major features (basic, collections, conditionals, externalref, readiness)
+
+## Auditing Our Code Against Upstream KRO
+
+**MANDATORY PROCESS:** When asked to audit, compare, verify, or review function-kro's KRO libraries against upstream KRO, you MUST follow this process exactly. Do NOT guess, speculate, or infer what is or isn't upstream code by reading our files alone.
+
+### Preferred: Use Skills
+
+Two skills automate the audit process end-to-end:
+
+- **`/audit-patches v<tag>`** — Validates that `patches/v*_PATCHES.md` accurately documents all modifications, additions, and exclusions. Use when checking documentation accuracy or before an upgrade.
+- **`/review-kro-adaptations v<tag>`** — Principal-level engineering review of every adaptation. Assesses minimality, correctness, maintainability, and whether a senior engineer would make different choices. Use for code quality assessment.
+
+Both skills use the diff script under the hood, clone upstream once, and produce structured reports.
+
+### Manual Fallback
+
+If the skills are unavailable or you need to debug, use the diff script directly:
+
+1. **Run the diff script.** This is non-negotiable. The script clones upstream KRO and performs real file-by-file diffs with import path normalization:
+   ```bash
+   # Summary of all differences
+   ./scripts/diff-upstream-kro.sh -s -r <upstream-tag>
+
+   # Full diff for a specific file
+   ./scripts/diff-upstream-kro.sh -f graph/builder.go -r <upstream-tag>
+
+   # Full diff of everything (verbose)
+   ./scripts/diff-upstream-kro.sh -r <upstream-tag>
+   ```
+
+2. **Use the script output as the sole source of truth.** The script categorizes every file as `[IDENTICAL]`, `[MODIFIED]`, `[LOCAL ONLY]`, or `[UPSTREAM ONLY]`. Only files marked `[MODIFIED]` are actual adaptations. Only files marked `[LOCAL ONLY]` are our additions.
+
+3. **For any claim about a specific file being modified or identical, cite the diff.** Run the script with `-f <file>` to get the actual diff. Do not claim a file is modified without seeing the diff output.
+
+### What You Must NOT Do
+
+- Do NOT read our code and guess whether something "looks like" a function-kro addition
+- Do NOT claim a function exists only in function-kro without checking upstream
+- Do NOT report findings without having run the diff script first
+- Do NOT use your training data knowledge of upstream KRO — it may be outdated
+
+### When to Use This Process
+
+- User asks to "audit", "compare", "verify", or "check" our code against upstream
+- User asks if the patches documentation is accurate
+- User asks what we've changed from upstream KRO
+- During upgrade process (Phase 1, Step 1.0 of UPGRADE_PROCESS.md)
 
 ## Troubleshooting
 

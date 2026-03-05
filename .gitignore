@@ -20,8 +20,9 @@
 # Go workspace file
 go.work
 
-# ignore AI tools settings/config
-/.claude
+# Claude Code - ignore user-specific files, commit shared skills/commands
+/.claude/settings.local.json
+/.claude/memory/
 
 # Demo files
 aws-credentials.txt
