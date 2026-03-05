@@ -147,10 +147,6 @@ func (n *Node) GetDesired() ([]*unstructured.Unstructured, error) {
 	}
 
 	if err == nil {
-		if n.Spec.Meta.Namespaced && n.Spec.Meta.Type != graph.NodeTypeInstance {
-			inst := n.deps[graph.InstanceNodeID]
-			normalizeNamespaces(result, inst.observed[0].GetNamespace())
-		}
 		n.desired = result
 	}
 	return result, err
@@ -166,25 +162,9 @@ func (n *Node) GetDesiredIdentity() ([]*unstructured.Unstructured, error) {
 	vars := n.templateVarsForPaths(identityPaths)
 	switch n.Spec.Meta.Type {
 	case graph.NodeTypeCollection:
-		result, err := n.hardResolveCollection(vars, false)
-		if err != nil {
-			return nil, err
-		}
-		if n.Spec.Meta.Namespaced {
-			inst := n.deps[graph.InstanceNodeID]
-			normalizeNamespaces(result, inst.observed[0].GetNamespace())
-		}
-		return result, nil
+		return n.hardResolveCollection(vars, false)
 	case graph.NodeTypeResource, graph.NodeTypeExternal:
-		result, err := n.hardResolveSingleResource(vars)
-		if err != nil {
-			return nil, err
-		}
-		if n.Spec.Meta.Namespaced {
-			inst := n.deps[graph.InstanceNodeID]
-			normalizeNamespaces(result, inst.observed[0].GetNamespace())
-		}
-		return result, nil
+		return n.hardResolveSingleResource(vars)
 	case graph.NodeTypeInstance:
 		panic("GetDesiredIdentity called for instance node")
 	default:
@@ -192,16 +172,7 @@ func (n *Node) GetDesiredIdentity() ([]*unstructured.Unstructured, error) {
 	}
 }
 
-func normalizeNamespaces(objs []*unstructured.Unstructured, namespace string) {
-	// TODO: When cluster-scoped instances are supported, either default to
-	// metav1.NamespaceDefault here or enforce namespace presence in graphbuilder.
-	for _, obj := range objs {
-		if obj.GetNamespace() != "" {
-			continue
-		}
-		obj.SetNamespace(namespace)
-	}
-}
+
 
 // DeleteTargets returns the ordered list of objects this node should delete now.
 //

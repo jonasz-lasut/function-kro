@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"regexp"
 
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/upbound/function-kro/input/v1beta1"
@@ -247,20 +246,4 @@ func validateCombinableResourceFields(res *v1beta1.Resource) error {
 	return nil
 }
 
-// validateTemplateConstraints enforces template-level constraints before parsing expressions.
-// Keep this small and focused on invariants that must hold regardless of CEL.
-//
-// TODO: We need more constraints here, e.g, you cannot set kro owned labels/annotations...
-func validateTemplateConstraints(rgResource *v1beta1.Resource, resourceObject map[string]interface{}, namespaced bool) error {
-	if !namespaced {
-		_, found, err := unstructured.NestedFieldNoCopy(resourceObject, "metadata", "namespace")
-		if err != nil {
-			return fmt.Errorf("resource %q has invalid metadata.namespace: %w", rgResource.ID, err)
-		}
-		if found {
-			return fmt.Errorf("resource %q is cluster-scoped and must not set metadata.namespace", rgResource.ID)
-		}
-	}
 
-	return nil
-}

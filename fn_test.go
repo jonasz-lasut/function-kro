@@ -645,7 +645,7 @@ func TestRunFunction(t *testing.T) {
 								Resource: resource.MustStructJSON(`{
 									"apiVersion": "s3.aws.upbound.io/v1beta1",
 									"kind": "Bucket",
-									"metadata": {"namespace": "xr-ns"},
+									"metadata": {},
 									"spec": {
 										"forProvider": {
 											"region": "cool-region-2"
@@ -770,7 +770,7 @@ func TestRunFunction(t *testing.T) {
 								Resource: resource.MustStructJSON(`{
 									"apiVersion": "s3.aws.upbound.io/v1beta1",
 									"kind": "Bucket",
-									"metadata": {"namespace": "xr-ns"},
+									"metadata": {},
 									"spec": {
 										"forProvider": {
 											"region": "us-west-2"

@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gobuffalo/flect"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
 
@@ -65,11 +64,4 @@ func ExtractGVKFromUnstructured(unstructured map[string]interface{}) (schema.Gro
 	}, nil
 }
 
-func GetResourceGraphDefinitionInstanceGVR(group, apiVersion, kind string) schema.GroupVersionResource {
-	pluralKind := flect.Pluralize(strings.ToLower(kind))
-	return schema.GroupVersionResource{
-		Group:    group,
-		Version:  apiVersion,
-		Resource: pluralKind,
-	}
-}
+

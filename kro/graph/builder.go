@@ -21,7 +21,6 @@ import (
 
 	"github.com/google/cel-go/cel"
 	"golang.org/x/exp/maps"
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/apiserver/pkg/cel/openapi"
@@ -39,15 +38,13 @@ import (
 	"github.com/upbound/function-kro/kro/metadata"
 )
 
-// NewBuilder creates a new GraphBuilder instance from a SchemaResolver and RESTMapper.
+// NewBuilder creates a new GraphBuilder instance from a SchemaResolver.
 //
 // This is the constructor for use with Crossplane functions. The resolver provides
-// schema resolution for GVKs, and the restMapper (optional) provides GVK to GVR mapping.
-// If restMapper is nil, a convention-based fallback is used (pluralize kind, assume namespaced).
-func NewBuilder(schemaResolver resolver.SchemaResolver, restMapper meta.RESTMapper) *Builder {
+// schema resolution for GVKs.
+func NewBuilder(schemaResolver resolver.SchemaResolver) *Builder {
 	return &Builder{
 		schemaResolver: schemaResolver,
-		restMapper:     restMapper,
 	}
 }
 
@@ -72,7 +69,6 @@ func NewBuilder(schemaResolver resolver.SchemaResolver, restMapper meta.RESTMapp
 type Builder struct {
 	// schemaResolver is used to resolve the OpenAPI schema for the resources.
 	schemaResolver resolver.SchemaResolver
-	restMapper     meta.RESTMapper
 }
 
 // NewResourceGraphDefinition creates a new Graph from a ResourceGraph input and XR schema.
@@ -267,24 +263,7 @@ func (b *Builder) buildRGResource(
 		return nil, nil, fmt.Errorf("failed to get schema for resource %s: %w", rgResource.ID, err)
 	}
 
-	// 6. Get REST mapping for GVR and namespace scope.
-	// Use convention-based fallback if restMapper is nil.
-	var gvr = gvk.GroupVersion().WithResource(strings.ToLower(gvk.Kind) + "s")
-	var namespaced = true
-	if b.restMapper != nil {
-		mapping, err := b.restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to get REST mapping for resource %s: %w", rgResource.ID, err)
-		}
-		gvr = mapping.Resource
-		namespaced = mapping.Scope.Name() == meta.RESTScopeNameNamespace
-	}
-
-	if err := validateTemplateConstraints(rgResource, resourceObject, namespaced); err != nil {
-		return nil, nil, err
-	}
-
-	// 7. Extract CEL fieldDescriptors from the resource.
+	// 6. Extract CEL fieldDescriptors from the resource.
 	var fieldDescriptors []variable.FieldDescriptor
 	if gvk.Group == "apiextensions.k8s.io" && gvk.Version == "v1" && gvk.Kind == "CustomResourceDefinition" {
 		fieldDescriptors, err = parser.ParseSchemalessResource(resourceObject)
@@ -347,11 +326,9 @@ func (b *Builder) buildRGResource(
 	// Note that dependencies are not set here - they're extracted later in buildDependencyGraph.
 	node := &Node{
 		Meta: NodeMeta{
-			ID:         rgResource.ID,
-			Index:      order,
-			Type:       nodeType,
-			GVR:        gvr,
-			Namespaced: namespaced,
+			ID:    rgResource.ID,
+			Index: order,
+			Type:  nodeType,
 			// Dependencies will be set by buildDependencyGraph
 		},
 		Template:    &unstructured.Unstructured{Object: resourceObject},
@@ -477,18 +454,10 @@ func extractTemplateDependencies(
 
 			// Track iterators used in identity fields (name/namespace).
 			switch templateVariable.Path {
-			case MetadataNamePath:
+			case MetadataNamePath, MetadataNamespacePath:
 				for _, iter := range iteratorRefs {
 					if !slices.Contains(iteratorsInIdentity, iter) {
 						iteratorsInIdentity = append(iteratorsInIdentity, iter)
-					}
-				}
-			case MetadataNamespacePath:
-				if node.Meta.Namespaced {
-					for _, iter := range iteratorRefs {
-						if !slices.Contains(iteratorsInIdentity, iter) {
-							iteratorsInIdentity = append(iteratorsInIdentity, iter)
-						}
 					}
 				}
 			}
@@ -610,7 +579,6 @@ func (b *Builder) buildInstanceNode(
 		Meta: NodeMeta{
 			ID:           InstanceNodeID,
 			Type:         NodeTypeInstance,
-			Namespaced:   true, // Instances are always namespaced
 			Dependencies: uniqueInstanceDeps,
 		},
 		Template: &unstructured.Unstructured{
