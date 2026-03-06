@@ -75,22 +75,22 @@ func WrapSchemaAsList(itemSchema *spec.Schema) *spec.Schema {
 
 // DeepCopySchema creates a deep copy of a spec.Schema.
 // This is useful when you need to modify a schema without affecting the original.
-func DeepCopySchema(schema *spec.Schema) *spec.Schema {
+func DeepCopySchema(schema *spec.Schema) (*spec.Schema, error) {
 	if schema == nil {
-		return nil
+		return nil, nil
 	}
 
 	// Use JSON round-trip for deep copy since spec.Schema is a complex struct
 	// with many nested pointers and maps.
 	data, err := json.Marshal(schema)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("failed to marshal schema: %w", err)
 	}
 
 	copied := &spec.Schema{}
 	if err := json.Unmarshal(data, copied); err != nil {
-		return nil
+		return nil, fmt.Errorf("failed to unmarshal schema: %w", err)
 	}
 
-	return copied
+	return copied, nil
 }

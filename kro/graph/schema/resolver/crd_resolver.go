@@ -16,7 +16,6 @@ package resolver
 
 import (
 	"fmt"
-	"sync"
 
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -27,10 +26,10 @@ import (
 
 // CRDSchemaResolver is a resolver.SchemaResolver backed by a set of CRDs.
 // It extracts OpenAPI schemas from CRD validation schemas.
+// The map is read-only after construction.
 type CRDSchemaResolver struct {
 	// schemas maps GVK to the extracted spec.Schema
 	schemas map[schema.GroupVersionKind]*spec.Schema
-	mx      sync.RWMutex
 }
 
 // NewCRDSchemaResolver creates a new CRDSchemaResolver from a set of CRDs.
@@ -82,7 +81,5 @@ func NewCRDSchemaResolver(crds []*extv1.CustomResourceDefinition) (*CRDSchemaRes
 
 // ResolveSchema returns the OpenAPI schema for the given GVK.
 func (r *CRDSchemaResolver) ResolveSchema(gvk schema.GroupVersionKind) (*spec.Schema, error) {
-	r.mx.RLock()
-	defer r.mx.RUnlock()
 	return r.schemas[gvk], nil
 }

@@ -15,8 +15,6 @@
 package resolver
 
 import (
-	"sync"
-
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/kube-openapi/pkg/validation/spec"
 )
@@ -24,9 +22,9 @@ import (
 // SchemaMapResolver is a resolver.SchemaResolver backed by a map of GVK to
 // OpenAPI schemas. This is used when schemas are provided directly (e.g., from
 // Crossplane's required_schemas) rather than extracted from CRDs.
+// The map is read-only after construction.
 type SchemaMapResolver struct {
 	schemas map[schema.GroupVersionKind]*spec.Schema
-	mx      sync.RWMutex
 }
 
 // NewSchemaMapResolver creates a new SchemaMapResolver from a map of GVK to
@@ -37,7 +35,5 @@ func NewSchemaMapResolver(schemas map[schema.GroupVersionKind]*spec.Schema) *Sch
 
 // ResolveSchema returns the OpenAPI schema for the given GVK.
 func (r *SchemaMapResolver) ResolveSchema(gvk schema.GroupVersionKind) (*spec.Schema, error) {
-	r.mx.RLock()
-	defer r.mx.RUnlock()
 	return r.schemas[gvk], nil
 }

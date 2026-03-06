@@ -99,7 +99,7 @@ func (f *Function) RunFunction(_ context.Context, req *fnv1.RunFunctionRequest) 
 	}
 
 	// Build the KRO graph using the schema resolver.
-	gb := graph.NewBuilder(resolver, nil)
+	gb := graph.NewBuilder(resolver)
 	g, err := gb.NewResourceGraphDefinition(rg, xrSchema)
 	if err != nil {
 		response.Fatal(rsp, errors.Wrap(err, "cannot create resource graph"))
