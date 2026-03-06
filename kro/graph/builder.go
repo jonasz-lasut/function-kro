@@ -1048,9 +1048,9 @@ func validateForEachExpressions(env *cel.Env, node *Node) (map[string]*cel.Type,
 	return iteratorTypes, nil
 }
 
-// getSchemaWithoutStatus creates a copy of the schema with status removed and
-// metadata added. This is used for the "schema" CEL variable which should only
-// include spec fields (not status) but should include metadata for templating.
+// getSchemaWithoutStatus creates a copy of the schema with status removed.
+// This is used for the "schema" CEL variable which should only include spec
+// and metadata fields (not status) for templating.
 func getSchemaWithoutStatus(schema *spec.Schema) (*spec.Schema, error) {
 	if schema == nil {
 		return nil, nil
@@ -1062,15 +1062,8 @@ func getSchemaWithoutStatus(schema *spec.Schema) (*spec.Schema, error) {
 		return nil, fmt.Errorf("failed to deep copy schema: %w", err)
 	}
 
-	if schemaCopy.Properties == nil {
-		schemaCopy.Properties = make(map[string]spec.Schema)
-	}
-
 	// Remove status property
 	delete(schemaCopy.Properties, "status")
-
-	// Add metadata schema
-	schemaCopy.Properties["metadata"] = kroschema.ObjectMetaSchema
 
 	return schemaCopy, nil
 }
