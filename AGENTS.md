@@ -254,6 +254,14 @@ if diff := cmp.Diff(nil, err, cmpopts.EquateErrors()); diff != "" {
 
 Do **not** use testify assertions (`require.NoError`, `assert.Contains`, etc.) or manual field-by-field checks in `fn_test.go`. Construct the full expected `*fnv1.RunFunctionResponse` — including `Results` for fatal cases — and diff it. This keeps all tests consistent and makes failures easy to read.
 
+### End-to-End Example Validation
+
+The `/test-examples` skill validates all examples from `example/README.md` end-to-end against a real kind cluster with AWS resources. It creates the cluster, installs Crossplane and extensions, executes each example's commands, makes automated pass/fail assertions based on the README's descriptions, and cleans up. Stops on first failure.
+
+```
+/test-examples
+```
+
 ### Linting
 
 ```bash
@@ -344,7 +352,7 @@ The runtime deduplicates CEL expression evaluation via a shared `expressionsCach
 - `patches/v0.8.x_PATCHES.md` — Historical reference for KRO v0.8.x adaptations (superseded by v0.9.0)
 - `patches/UPGRADE_PROCESS.md` — Process for upgrading from upstream KRO releases
 - `spec-desired-ssa.md` — Original SSA design spec (references older API names; implementation evolved)
-- `example/README.md` — Working examples for all major features (basic, collections, conditionals, externalref, readiness)
+- `example/README.md` — Working examples for all major features (basic, collections, conditionals, externalref, readiness, omit, collection-limits)
 
 ## Auditing Our Code Against Upstream KRO
 
