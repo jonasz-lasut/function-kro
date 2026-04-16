@@ -38,7 +38,7 @@ spec:
           spec:
             type: object
             properties:
-              name:
+              region:
                 type: string
           status:
             type: object

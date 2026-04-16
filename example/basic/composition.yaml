@@ -24,7 +24,7 @@ spec:
       resources:
       - id: vpc
         template:
-          apiVersion: ec2.aws.m.upbound.io/v1beta1
+          apiVersion: ec2.aws.upbound.io/v1beta1
           kind: VPC
           metadata: {}
           spec:
@@ -35,7 +35,7 @@ spec:
               enableDnsSupport: true
       - id: subnetAZA
         template:
-          apiVersion: ec2.aws.m.upbound.io/v1beta1
+          apiVersion: ec2.aws.upbound.io/v1beta1
           kind: Subnet
           metadata: {}
           spec:
@@ -46,7 +46,7 @@ spec:
               vpcId: ${vpc.status.atProvider.id}
       - id: subnetAZB
         template:
-          apiVersion: ec2.aws.m.upbound.io/v1beta1
+          apiVersion: ec2.aws.upbound.io/v1beta1
           kind: Subnet
           metadata: {}
           spec:
@@ -57,7 +57,7 @@ spec:
               vpcId: ${vpc.status.atProvider.id}
       - id: subnetAZC
         template:
-          apiVersion: ec2.aws.m.upbound.io/v1beta1
+          apiVersion: ec2.aws.upbound.io/v1beta1
           kind: Subnet
           metadata: {}
           spec:
@@ -68,7 +68,7 @@ spec:
               vpcId: ${vpc.status.atProvider.id}
       - id: securityGroup
         template:
-          apiVersion: ec2.aws.m.upbound.io/v1beta1
+          apiVersion: ec2.aws.upbound.io/v1beta1
           kind: SecurityGroup
           metadata: {}
           spec:

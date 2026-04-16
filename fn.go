@@ -10,6 +10,7 @@ import (
 	"github.com/kubernetes-sigs/kro/api/v1alpha1"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/structpb"
+	corev1 "k8s.io/api/core/v1"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -197,11 +198,13 @@ func (f *Function) RunFunction(_ context.Context, req *fnv1.RunFunctionRequest) 
 	// Build a minimal desired XR containing only the status paths declared in
 	// the ResourceGraph. This is critical for SSA - we must only include fields
 	// we want to own.
-	dxr, err := buildDesiredXRStatus(rt, g, oxr)
+	dxr, conditions, err := buildDesiredXRStatus(rt, g, oxr)
 	if err != nil {
 		response.Fatal(rsp, err)
 		return rsp, nil
 	}
+
+	rsp.Conditions = conditions
 
 	if err := response.SetDesiredCompositeResource(rsp, &resource.Composite{Resource: dxr}); err != nil {
 		response.Fatal(rsp, errors.Wrap(err, "cannot set desired composite resource"))
@@ -648,14 +651,16 @@ func buildDesiredComposed(log logging.Logger, rt *runtime.Runtime, dcds map[reso
 // buildDesiredXRStatus builds a minimal desired XR containing only the resolved
 // status paths declared in the ResourceGraph. This is critical for SSA - we
 // must only include fields we want to own.
-func buildDesiredXRStatus(rt *runtime.Runtime, g *graph.Graph, oxr *resource.Composite) (*composite.Unstructured, error) {
+func buildDesiredXRStatus(rt *runtime.Runtime, g *graph.Graph, oxr *resource.Composite) (*composite.Unstructured, []*fnv1.Condition, error) {
 	dxr := &composite.Unstructured{Unstructured: unstructured.Unstructured{Object: map[string]any{}}}
 	dxr.SetAPIVersion(oxr.Resource.GetAPIVersion())
 	dxr.SetKind(oxr.Resource.GetKind())
 
+	conditions := make([]*fnv1.Condition, 0)
+
 	instanceDesired, err := rt.Instance().GetDesired()
 	if err != nil {
-		return nil, errors.Wrap(err, "cannot get desired instance status")
+		return nil, nil, errors.Wrap(err, "cannot get desired instance status")
 	}
 
 	if len(instanceDesired) > 0 && instanceDesired[0] != nil {
@@ -668,12 +673,32 @@ func buildDesiredXRStatus(rt *runtime.Runtime, g *graph.Graph, oxr *resource.Com
 				continue
 			}
 			if err := dst.SetValue(v.Path, val); err != nil {
-				return nil, errors.Wrapf(err, "cannot set desired XR status field %q", v.Path)
+				return nil, nil, errors.Wrapf(err, "cannot set desired XR status field %q", v.Path)
 			}
+		}
+
+		// Serialize status.conditions to the intermediate format
+		intermediateConditions := make([]*intermediateCondition, 0)
+		err = dst.GetValueInto("status.conditions", &intermediateConditions)
+
+		// No status.conditions are present, return early
+		if fieldpath.IsNotFound(err) {
+			return dxr, nil, nil
+		}
+
+		// Convert corev1.Conditions to fnv1.Condition
+		for _, intCond := range intermediateConditions {
+			conditions = append(conditions, intCond.toFNV1Condition())
+		}
+
+		// Delete status.conditions from DXR and return them explicitely
+		err = dst.DeleteField("status.conditions")
+		if err != nil {
+			return nil, nil, errors.Wrap(err, "cannot delete desired XR conditions")
 		}
 	}
 
-	return dxr, nil
+	return dxr, conditions, nil
 }
 
 // structToSpecSchema converts a protobuf Struct (as returned by Crossplane's
@@ -696,4 +721,46 @@ func structToSpecSchema(s *structpb.Struct) (*spec.Schema, error) {
 	}
 
 	return schema, nil
+}
+
+// intermediateCondition is a type that describes the conditions returned by KRO runtime
+// that are later converted to fnv1.Condition
+type intermediateCondition struct {
+	// Type of condition in PascalCase.
+	Type string `json:"type,omitempty"`
+	// Status of the condition.
+	Status corev1.ConditionStatus `json:"status,omitempty"`
+	// Reason contains a programmatic identifier indicating the reason for the
+	// condition's last transition. Producers of specific condition types may
+	// define expected values and meanings for this field, and whether the values
+	// are considered a guaranteed API. The value should be a PascalCase string.
+	// This field may not be empty.
+	Reason string `json:"reason,omitempty"`
+	// Message is a human readable message indicating details about the
+	// transition. This may be an empty string.
+	Message *string `json:"message,omitempty"`
+}
+
+// toFNV1Condition converts the intermediateCondition to fnv1.Condition
+// with Status mapping
+func (c *intermediateCondition) toFNV1Condition() *fnv1.Condition {
+	var fnv1status fnv1.Status
+
+	switch c.Status {
+	case corev1.ConditionTrue:
+		fnv1status = fnv1.Status_STATUS_CONDITION_TRUE
+	case corev1.ConditionFalse:
+		fnv1status = fnv1.Status_STATUS_CONDITION_FALSE
+	case corev1.ConditionUnknown:
+		fnv1status = fnv1.Status_STATUS_CONDITION_UNKNOWN
+	default:
+		fnv1status = fnv1.Status_STATUS_CONDITION_UNSPECIFIED
+	}
+
+	return &fnv1.Condition{
+		Type:    c.Type,
+		Reason:  c.Reason,
+		Message: c.Message,
+		Status:  fnv1status,
+	}
 }
